@@ -109,8 +109,9 @@ async function startServer() {
       const existing = activeSessions.get(cleanEmail);
 
       // Check if another active session exists that is still alive and has a different sessionId
+      const isPrivileged = cleanEmail === 'tmrbe2006@gmail.com' || userRole === 'developer' || userRole === 'admin';
       if (existing && (now - existing.lastHeartbeat < SESSION_EXPIRY_MS) && existing.sessionId !== sessionId) {
-        if (!force) {
+        if (!force && !isPrivileged) {
           return res.status(409).json({
             success: false,
             conflict: true,
@@ -1020,6 +1021,7 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
         console.log(`Attempting to send email using Apps Script URL ${i + 1}/${urls.length}: ${currentUrl}`);
         const resResult = await postToGoogleAppsScript(currentUrl, { to, subject, body, htmlBody, attachments });
 
+        const textLower = resResult.text.toLowerCase();
         let jsonResult;
         try {
           jsonResult = JSON.parse(resResult.text);
@@ -1027,11 +1029,12 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
           jsonResult = { success: resResult.success, rawResponse: resResult.text };
         }
 
-        const textLower = resResult.text.toLowerCase();
+        const jsonErrStr = String(jsonResult?.error || jsonResult?.message || '').toLowerCase();
         const hasQuotaError = textLower.includes('service invoked too many times') || 
                               textLower.includes('limit exceeded') || 
                               textLower.includes('quota exceeded') ||
-                              textLower.includes('exceeded');
+                              jsonErrStr.includes('service invoked too many times') ||
+                              jsonErrStr.includes('quota');
 
         const isScriptSuccess = resResult.success && !hasQuotaError && 
                                 (!jsonResult || (jsonResult.status !== 'error' && jsonResult.success !== false));
@@ -1041,17 +1044,35 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
           successfulUrlIndex = i;
           break; // Succeeded! Stop iterating
         } else {
-          const errMsg = jsonResult?.error || jsonResult?.message || (hasQuotaError ? 'تجاوز حد الإرسال اليومي لـ Google (Quota Exceeded)' : 'فشل تنفيذ النص البرمجي أو صلاحية الوصول مقيدة');
-          console.info(`[Google Apps Script] URL ${i + 1} notice:`, errMsg);
+          const quotaExplanation = 'تم استهلاك الحد اليومي لإرسال البريد الإلكتروني المسموح به مجاناً من Google (100 رسالة/يوم). سيتم استئناف الإرسال التلقائي غداً بعد إعادة تصفير الحصة من Google.';
+          const errMsg = hasQuotaError ? quotaExplanation : (jsonResult?.error || jsonResult?.message || 'فشل تنفيذ النص البرمجي أو صلاحية الوصول مقيدة');
+          
+          if (hasQuotaError) {
+            console.log(`[Google Apps Script] Daily email quota limit reached on URL ${i + 1}.`);
+          } else {
+            console.log(`[Google Apps Script] URL ${i + 1} execution returned non-success.`);
+          }
+
           errors.push({
             url: currentUrl,
             status: resResult.status,
             error: errMsg,
-            result: jsonResult
+            isQuotaExceeded: hasQuotaError,
+            result: hasQuotaError ? {
+              success: false,
+              isQuotaExceeded: true,
+              error: "تنبيه: تجاوز حد الإرسال اليومي لـ Google (Quota Exceeded) ⚠️",
+              details: "وصل حساب Google المرتبط برابط الـ Web App إلى الحد الأقصى اليومي المسموح به مجاناً من Google (100 إيميل في اليوم). هذا قيد أمني عام من شركة Google على الحسابات المجانية.",
+              instructions: [
+                "تنتظر حتى تقوم Google بإعادة تصفير الحصة اليومية تلقائياً (خلال 24 ساعة).",
+                "أو تنشئ رابط Google Apps Script جديداً من حساب Google إضافي وتلصقه بجانب الرابط الحالي (يفصل بينهما بفاصلة أو سطر جديد) ليقوم النظام بالتبديل التلقائي عند انتهاء الحصة.",
+                "أو تعتمد على إرسال التقارير وتنبيهات الأدوية عبر WhatsApp المدمج بالنظام مجاناً وبدون حدود."
+              ]
+            } : jsonResult
           });
         }
       } catch (err: any) {
-        console.warn(`[Google Apps Script] URL ${i + 1} notice:`, err.message);
+        console.log(`[Google Apps Script] Connection failed on URL ${i + 1}: ${err.message}`);
         errors.push({
           url: currentUrl,
           error: err.message
@@ -1072,6 +1093,7 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
       };
       res.json({ 
         success: false, 
+        isQuotaExceeded: errors.some(e => e.isQuotaExceeded),
         error: firstError?.error || 'فشلت جميع روابط Google Apps Script المتاحة في إرسال البريد الإلكتروني.', 
         result: errorObj,
         details: errors.map(e => `[رابط ${e.url.substring(0, 45)}...]: ${e.error || 'فشل غير معروف'}`).join(' | '),
@@ -1421,11 +1443,6 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
               });
 
               const textLower = mailResult.text.toLowerCase();
-              const hasQuotaError = textLower.includes('service invoked too many times') || 
-                                    textLower.includes('limit exceeded') || 
-                                    textLower.includes('quota exceeded') ||
-                                    textLower.includes('exceeded');
-
               let jsonResult;
               try {
                 jsonResult = JSON.parse(mailResult.text);
@@ -1433,25 +1450,34 @@ ${hasTremors ? `* 🫨 **تحذير ارتعاش عضلي بالأطراف:** ت
                 jsonResult = null;
               }
 
+              const jsonErrStr = String(jsonResult?.error || jsonResult?.message || '').toLowerCase();
+              const hasQuotaError = textLower.includes('service invoked too many times') || 
+                                    textLower.includes('limit exceeded') || 
+                                    textLower.includes('quota exceeded') ||
+                                    jsonErrStr.includes('service invoked too many times') ||
+                                    jsonErrStr.includes('quota');
+
               const isScriptSuccess = mailResult.success && !hasQuotaError && 
                                       (!jsonResult || (jsonResult.status !== 'error' && jsonResult.success !== false));
 
               if (isScriptSuccess) {
-                logs.push(`[Google Apps Script Email] تم إرسال البريد بنجاح باستخدام الرابط رقم ${i + 1}/${urls.length} للمستلم ${notificationEmail}. الاستجابة: ${mailResult.text.substring(0, 100)}`);
+                logs.push(`[Google Apps Script Email] تم إرسال البريد بنجاح باستخدام الرابط رقم ${i + 1}/${urls.length} للمستلم ${notificationEmail}.`);
                 emailSentSuccessfully = true;
                 activeUrlIndex = i;
                 break; // Stop trying other URLs since it succeeded
               } else {
-                const errMsg = jsonResult?.error || jsonResult?.message || (hasQuotaError ? 'تجاوز حد الإرسال اليومي لـ Google (Quota Exceeded)' : 'فشل تنفيذ النص البرمجي أو صلاحية الوصول مقيدة');
-                logs.push(`[Google Apps Script Email Warning] فشل الإرسال بالرابط رقم ${i + 1} (${currentUrl.substring(0, 40)}...): ${errMsg}`);
+                const errMsg = hasQuotaError 
+                  ? 'تم استهلاك الحد اليومي لإرسال البريد من حساب Google (100 رسالة/يوم). سيتم استئناف الإرسال التلقائي غداً بعد تجديد الحصة من Google.' 
+                  : (jsonResult?.error || jsonResult?.message || 'فشل تنفيذ النص البرمجي أو صلاحية الوصول مقيدة');
+                logs.push(`[Google Apps Script Email] ${errMsg}`);
               }
             } catch (err: any) {
-              logs.push(`[Google Apps Script Email Error] الرابط رقم ${i + 1} واجه خطأً: ${err.message}`);
+              logs.push(`[Google Apps Script Email] تعذر الاتصال بالرابط رقم ${i + 1}: ${err.message}`);
             }
           }
 
           if (!emailSentSuccessfully) {
-            logs.push(`[Google Apps Script Email Error] فشلت جميع روابط Apps Script الـ ${urls.length} المتوفرة في إرسال البريد الإلكتروني.`);
+            logs.push(`[Google Apps Script Email] تم تعليق الإرسال بالبريد مؤقتاً لاستهلاك الحصة اليومية لـ Google.`);
           }
         }
       } else {

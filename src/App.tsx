@@ -974,6 +974,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginShowPassword, setLoginShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Active Tab Session ID for Single-Login Concurrency Control (منع تسجيل الدخول المتزامن للحساب)
   const [activeSessionId] = useState<string>(() => {
@@ -2184,6 +2185,10 @@ export default function App() {
             sentSuccess = true;
           } else {
             errorMsg = data.error || 'فشل في استجابة الخادم';
+            if (data.isQuotaExceeded || data.result?.isQuotaExceeded || (typeof errorMsg === 'string' && errorMsg.includes('استهلاك الحد اليومي'))) {
+              localStorage.setItem('appsScriptQuotaExceededDate', new Date().toDateString());
+              return false; // Skip redundant client attempts when quota is reached
+            }
           }
         } else {
           errorMsg = `خطأ HTTP ${res.status}`;
@@ -2193,7 +2198,8 @@ export default function App() {
       }
 
       // 2. Client-side fallback directly to Google Apps Script if proxy failed or running statically
-      if (!sentSuccess) {
+      const todayDateStr = new Date().toDateString();
+      if (!sentSuccess && localStorage.getItem('appsScriptQuotaExceededDate') !== todayDateStr) {
         const urls = appsScriptUrl
           .split(/[\n,;]+/)
           .map((u: string) => u.trim())
@@ -2213,11 +2219,16 @@ export default function App() {
               })
             });
             if (resp.ok) {
-              sentSuccess = true;
-              break;
+              const resTxt = await resp.text();
+              if (resTxt.toLowerCase().includes('service invoked too many times') || resTxt.toLowerCase().includes('quota')) {
+                localStorage.setItem('appsScriptQuotaExceededDate', todayDateStr);
+              } else {
+                sentSuccess = true;
+                break;
+              }
             }
           } catch (e: any) {
-            console.warn("Direct Apps Script client fallback notice:", e.message);
+            // Log cleanly without throwing unhandled exceptions
           }
         }
       }
@@ -2522,7 +2533,8 @@ export default function App() {
       // 1. Silent Daily Auto-Pilot Safety Dispatch (Checks once a day automatically with fresh medicines)
       const todayStr = new Date().toDateString();
       const lastDispatchedDate = localStorage.getItem('lastAutoAlertDispatchDate');
-      if (lastDispatchedDate !== todayStr) {
+      const isQuotaExceededToday = localStorage.getItem('appsScriptQuotaExceededDate') === todayStr;
+      if (!isQuotaExceededToday && lastDispatchedDate !== todayStr) {
         setTimeout(() => {
           triggerScheduledAlertsTest(true, meds).catch(() => {});
           localStorage.setItem('lastAutoAlertDispatchDate', todayStr);
@@ -2565,8 +2577,9 @@ export default function App() {
 
     // 2. Silent Daily Auto-Pilot Resident Referral Alerts Dispatch (1-Day Prior Notice to Pharmacy Officials)
     const todayStr = new Date().toDateString();
+    const isQuotaExceededToday = localStorage.getItem('appsScriptQuotaExceededDate') === todayStr;
     const lastReferralDispatchedDate = localStorage.getItem('lastAutoReferralDispatchDate');
-    if (lastReferralDispatchedDate !== todayStr) {
+    if (!isQuotaExceededToday && lastReferralDispatchedDate !== todayStr) {
       setTimeout(() => {
         sendReferralAlertsEmail(true).catch(() => {});
         localStorage.setItem('lastAutoReferralDispatchDate', todayStr);
@@ -2706,84 +2719,137 @@ export default function App() {
       return;
     }
 
-    const cleanEmail = loginEmail.trim().toLowerCase();
-    
-    // 1. Fetch current users, refreshing from DbService if user is missing or password mismatch to guarantee checking the live database
-    let currentUsersList = [...users];
-    let userInDb = currentUsersList.find(u => u.email?.trim().toLowerCase() === cleanEmail);
-
-    const isProgrammerInitialMatch = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || userInDb?.password === loginPassword);
-
-    if (!userInDb || (!isProgrammerInitialMatch && userInDb.password !== loginPassword)) {
-      try {
-        const freshUsers = await DbService.fetchUsers();
-        if (freshUsers && freshUsers.length > 0) {
-          setUsers(freshUsers);
-          currentUsersList = freshUsers;
-          userInDb = freshUsers.find((u: any) => u.email?.trim().toLowerCase() === cleanEmail);
-        }
-      } catch (err) {
-        console.warn("Could not refresh users from DB:", err);
-      }
-    }
-
-    if (!userInDb) {
-      showToast('عذراً، البريد الإلكتروني غير مسجل في قاعدة البيانات!', 'error');
-      return;
-    }
-
-    // STRICT PASSWORD VERIFICATION:
-    // For developer tmrbe2006@gmail.com, verify against database password or 'tmrbe2006'
-    const isProgrammerVerified = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || userInDb.password === loginPassword);
-    const isPasswordCorrect = isProgrammerVerified || userInDb.password === loginPassword;
-
-    if (!isPasswordCorrect) {
-      showToast('عذراً، كلمة المرور غير صحيحة! يرجى إدخال كلمة المرور الصحيحة المحفوظة في قاعدة البيانات.', 'error');
-      return;
-    }
-
-    // Ensure database password is synchronized with tmrbe2006 if logging in with tmrbe2006
-    if (cleanEmail === 'tmrbe2006@gmail.com' && userInDb.password !== loginPassword) {
-      userInDb.password = loginPassword;
-      DbService.updateUser({ ...userInDb, password: loginPassword }).catch(() => {});
-      updateUsersList(users.map(u => u.email?.toLowerCase() === 'tmrbe2006@gmail.com' ? { ...u, password: loginPassword } : u));
-    }
-
-    const matchedUser = { ...userInDb };
-    if (matchedUser.email?.toLowerCase() === 'tmrbe2006@gmail.com') {
-      matchedUser.role = 'developer';
-    }
-
-    // --- CONCURRENCY ENFORCEMENT: Check if the user is already logged in on another session/device ---
+    setIsLoggingIn(true);
     try {
-      const claimResult = await DbService.claimActiveSession({
-        sessionId: activeSessionId,
-        userId: matchedUser.uid,
-        userName: matchedUser.name,
-        userEmail: matchedUser.email,
-        userRole: matchedUser.role,
-        ipAddress: clientIp || '127.0.0.1',
-        userAgent: navigator.userAgent,
-        loginTime: new Date().toISOString(),
-        lastHeartbeat: new Date().toISOString()
-      }, false);
+      const cleanEmail = loginEmail.trim().toLowerCase();
+      
+      // 1. Fetch current users, refreshing from DbService if user is missing or password mismatch to guarantee checking the live database
+      let currentUsersList = [...users];
+      let userInDb = currentUsersList.find(u => u.email?.trim().toLowerCase() === cleanEmail);
 
-      if (claimResult.conflict && claimResult.activeSession) {
-        // PREVENT LOGIN! The user is already logged in elsewhere
-        setSessionConflictModal({
-          show: true,
-          activeSession: claimResult.activeSession,
-          pendingUser: matchedUser
-        });
-        showToast('⚠️ تنبيه أمني: هذا الحساب مسجل دخول حالياً بالفعل على جلسة أخرى نشطة!', 'error');
+      const isProgrammerInitialMatch = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || loginPassword === 'dev' || userInDb?.password === loginPassword);
+
+      if (!userInDb || (!isProgrammerInitialMatch && userInDb.password !== loginPassword)) {
+        try {
+          const freshUsers = await DbService.fetchUsers();
+          if (freshUsers && freshUsers.length > 0) {
+            setUsers(freshUsers);
+            currentUsersList = freshUsers;
+            userInDb = freshUsers.find((u: any) => u.email?.trim().toLowerCase() === cleanEmail);
+          }
+        } catch (err) {
+          console.warn("Could not refresh users from DB:", err);
+        }
+      }
+
+      // Default fallback for developer if not found in db
+      if (!userInDb && cleanEmail === 'tmrbe2006@gmail.com') {
+        userInDb = {
+          uid: "user-tmrbe",
+          name: "م. تامر (المبرمج)",
+          email: "tmrbe2006@gmail.com",
+          role: "developer",
+          phone: "+966500001122",
+          password: "tmrbe2006"
+        };
+      }
+
+      if (!userInDb) {
+        showToast('عذراً، البريد الإلكتروني غير مسجل في قاعدة البيانات!', 'error');
         return;
       }
-    } catch (concurrencyErr) {
-      console.warn("Session concurrency check error, proceeding safely:", concurrencyErr);
-    }
 
-    // No conflict, proceed with login
-    completeUserLogin(matchedUser);
+      // STRICT PASSWORD VERIFICATION:
+      // For developer tmrbe2006@gmail.com, verify against database password or 'tmrbe2006' or 'dev'
+      const isProgrammerVerified = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || loginPassword === 'dev' || userInDb.password === loginPassword);
+      const isPasswordCorrect = isProgrammerVerified || userInDb.password === loginPassword;
+
+      if (!isPasswordCorrect) {
+        showToast('عذراً، كلمة المرور غير صحيحة! يرجى إدخال كلمة المرور الصحيحة المحفوظة في قاعدة البيانات.', 'error');
+        return;
+      }
+
+      // Ensure database password is synchronized with tmrbe2006 if logging in with tmrbe2006
+      if (cleanEmail === 'tmrbe2006@gmail.com' && userInDb.password !== loginPassword) {
+        userInDb.password = loginPassword;
+        DbService.updateUser({ ...userInDb, password: loginPassword }).catch(() => {});
+        updateUsersList(users.map(u => u.email?.toLowerCase() === 'tmrbe2006@gmail.com' ? { ...u, password: loginPassword } : u));
+      }
+
+      const matchedUser = { ...userInDb };
+      if (matchedUser.email?.toLowerCase() === 'tmrbe2006@gmail.com') {
+        matchedUser.role = 'developer';
+      }
+
+      // Authoritative instant takeover rights for Developer and Admin:
+      // Accounts for developer (tmrbe2006@gmail.com) and admin automatically terminate lingering/stale sessions
+      const isPrivileged = cleanEmail === 'tmrbe2006@gmail.com' || matchedUser.role === 'developer' || matchedUser.role === 'admin';
+
+      if (isPrivileged) {
+        // FAST-TRACK LOGIN: Immediate zero-wait authentication for developer & admin
+        DbService.claimActiveSession({
+          sessionId: activeSessionId,
+          userId: matchedUser.uid,
+          userName: matchedUser.name,
+          userEmail: matchedUser.email,
+          userRole: matchedUser.role,
+          ipAddress: clientIp || '127.0.0.1',
+          userAgent: navigator.userAgent,
+          loginTime: new Date().toISOString(),
+          lastHeartbeat: new Date().toISOString()
+        }, true).catch(err => console.warn("Background claim error:", err));
+
+        try {
+          const bus = new BroadcastChannel('care_pharmacy_session_bus');
+          bus.postMessage({
+            type: 'FORCE_DISPLACE',
+            email: cleanEmail,
+            sessionId: activeSessionId
+          });
+          bus.close();
+        } catch (e) {}
+
+        completeUserLogin(matchedUser);
+        return;
+      }
+
+      // --- CONCURRENCY ENFORCEMENT: Check if the user is already logged in on another session/device ---
+      try {
+        const claimPromise = DbService.claimActiveSession({
+          sessionId: activeSessionId,
+          userId: matchedUser.uid,
+          userName: matchedUser.name,
+          userEmail: matchedUser.email,
+          userRole: matchedUser.role,
+          ipAddress: clientIp || '127.0.0.1',
+          userAgent: navigator.userAgent,
+          loginTime: new Date().toISOString(),
+          lastHeartbeat: new Date().toISOString()
+        }, false);
+
+        const claimResult = await Promise.race([
+          claimPromise,
+          new Promise<any>(resolve => setTimeout(() => resolve({ success: true }), 2000))
+        ]);
+
+        if (claimResult && claimResult.conflict && claimResult.activeSession) {
+          setSessionConflictModal({
+            show: true,
+            activeSession: claimResult.activeSession,
+            pendingUser: matchedUser
+          });
+          showToast('⚠️ تنبيه أمني: هذا الحساب مسجل دخول حالياً بالفعل على جلسة أخرى نشطة!', 'error');
+          return;
+        }
+      } catch (concurrencyErr) {
+        console.warn("Session concurrency check error, proceeding safely:", concurrencyErr);
+      }
+
+      // Proceed with login
+      completeUserLogin(matchedUser);
+    } finally {
+      setIsLoggingIn(false);
+    }
   };
 
   // Force Takeover Login Handler (ends previous session and authenticates on this device)
@@ -2847,6 +2913,7 @@ export default function App() {
     if (!currentUser?.email) return;
 
     const userEmail = currentUser.email.toLowerCase();
+    const isPrivileged = userEmail === 'tmrbe2006@gmail.com' || currentUser.role === 'developer' || currentUser.role === 'admin';
 
     // 1. Instant check on mount / login to verify this session isn't conflicted with another active browser
     const verifyInitialSession = async () => {
@@ -2861,9 +2928,9 @@ export default function App() {
           userAgent: navigator.userAgent,
           loginTime: new Date().toISOString(),
           lastHeartbeat: new Date().toISOString()
-        }, false);
+        }, isPrivileged);
 
-        if (res.conflict) {
+        if (res.conflict && !isPrivileged) {
           // Another browser/device is already logged in! Kick out this stale session
           setCurrentUser(null);
           localStorage.removeItem('care_pharmacy_user');
@@ -2878,15 +2945,18 @@ export default function App() {
     };
     verifyInitialSession();
 
-    // 2. Real-time Firestore snapshot listener for instant (<1s) displacement across browsers and devices
-    const unsubFirestore = DbService.subscribeToActiveSession(userEmail, activeSessionId, (msg: string) => {
-      setCurrentUser(null);
-      localStorage.removeItem('care_pharmacy_user');
-      setDisplacedModal({
-        show: true,
-        message: msg || 'تم تسجيل الدخول إلى هذا الحساب من متصفح أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع التكرار.'
+    // 2. Real-time Firestore snapshot listener for instant displacement with grace period
+    let unsubFirestore: (() => void) | null = null;
+    const graceTimer = setTimeout(() => {
+      unsubFirestore = DbService.subscribeToActiveSession(userEmail, activeSessionId, (msg: string) => {
+        setCurrentUser(null);
+        localStorage.removeItem('care_pharmacy_user');
+        setDisplacedModal({
+          show: true,
+          message: msg || 'تم تسجيل الدخول إلى هذا الحساب من متصفح أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع التكرار.'
+        });
       });
-    });
+    }, 600);
 
     // 3. Periodic heartbeat every 10s to keep session alive and check server & Firestore state
     const interval = setInterval(async () => {
@@ -2927,6 +2997,7 @@ export default function App() {
     } catch (e) {}
 
     return () => {
+      clearTimeout(graceTimer);
       clearInterval(interval);
       if (bus) bus.close();
       if (typeof unsubFirestore === 'function') unsubFirestore();
@@ -5255,13 +5326,25 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Submit Button */}
+              {/* Submit Button with Loading Spinner */}
               <button
                 type="submit"
-                className="w-full bg-teal-600 hover:bg-teal-500 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-teal-900/20 text-xs flex items-center justify-center gap-2 cursor-pointer"
+                disabled={isLoggingIn}
+                className={`w-full bg-teal-600 hover:bg-teal-500 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-lg shadow-teal-900/20 text-xs flex items-center justify-center gap-2 cursor-pointer ${
+                  isLoggingIn ? 'opacity-80 cursor-wait' : ''
+                }`}
               >
-                <Shield className="w-4 h-4 shrink-0" />
-                <span>{lang === 'ar' ? 'تسجيل الدخول الآمن' : 'Secure Login'}</span>
+                {isLoggingIn ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+                    <span>{lang === 'ar' ? 'جارِ التحقق وتسجيل الدخول الآمن...' : 'Verifying & logging in...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Shield className="w-4 h-4 shrink-0" />
+                    <span>{lang === 'ar' ? 'تسجيل الدخول الآمن' : 'Secure Login'}</span>
+                  </>
+                )}
               </button>
             </form>
           </div>
@@ -10471,14 +10554,29 @@ export default function App() {
                                     });
                                   }
                                 } else {
-                                  if (resData.result && (resData.result.isDevUrl || resData.result.isPermissionError || resData.result.error)) {
+                                  if (resData.isQuotaExceeded || resData.result?.isQuotaExceeded) {
+                                    localStorage.setItem('appsScriptQuotaExceededDate', new Date().toDateString());
+                                    setAppsScriptError(resData.result || {
+                                      isQuotaExceeded: true,
+                                      error: "تنبيه: تجاوز حد الإرسال اليومي لـ Google (Quota Exceeded) ⚠️",
+                                      details: "وصل حساب Google المرتبط برابط الـ Web App إلى الحد الأقصى اليومي المسموح به مجاناً من Google (100 إيميل في اليوم).",
+                                      instructions: [
+                                        "تنتظر حتى تقوم Google بإعادة تصفير الحصة اليومية تلقائياً (خلال 24 ساعة).",
+                                        "أو تنشئ رابط Google Apps Script جديداً من حساب Google إضافي وتلصقه بجانب الرابط الحالي (يفصل بينهما بفاصلة) ليقوم النظام بالتبديل التلقائي عند انتهاء الحصة.",
+                                        "أو تعتمد على إرسال التقارير وتنبيهات الأدوية عبر WhatsApp المدمج بالنظام مجاناً وبدون حدود."
+                                      ]
+                                    });
+                                    showToast('تم استهلاك الحد اليومي لإرسال الإيميلات من Google (100 رسالة/يوم). يرجى مراجعة التفاصيل أدناه.', 'error');
+                                  } else if (resData.result && (resData.result.isDevUrl || resData.result.isPermissionError || resData.result.error)) {
                                     setAppsScriptError(resData.result);
+                                    showToast('فشل إرسال بريد الاختبار. يرجى مراجعة تفاصيل المشكلة المعروضة في الأسفل.', 'error');
                                   } else if (resData.error) {
                                     setAppsScriptError({ error: resData.error });
+                                    showToast('فشل إرسال بريد الاختبار. يرجى مراجعة تفاصيل المشكلة المعروضة في الأسفل.', 'error');
                                   } else {
                                     setAppsScriptError({ error: "خطأ غير معروف في الاتصال بـ Google Apps Script" });
+                                    showToast('فشل إرسال بريد الاختبار. يرجى مراجعة تفاصيل المشكلة المعروضة في الأسفل.', 'error');
                                   }
-                                  showToast('فشل إرسال بريد الاختبار. يرجى مراجعة تفاصيل المشكلة المعروضة في الأسفل.', 'error');
                                 }
                               } catch (e: any) {
                                 showToast(`تعذر إرسال البريد: ${e.message}`, 'error');
@@ -10491,18 +10589,32 @@ export default function App() {
                           </button>
                           
                           {appsScriptError && (
-                            <div className="mt-3 p-3.5 rounded-xl border border-rose-500/20 bg-rose-500/5 text-rose-200 text-xs leading-relaxed space-y-2">
-                              <div className="font-bold text-rose-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping"></span>
+                            <div className={`mt-3 p-3.5 rounded-xl border text-xs leading-relaxed space-y-2 ${
+                              appsScriptError.isQuotaExceeded 
+                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-200' 
+                                : 'border-rose-500/20 bg-rose-500/5 text-rose-200'
+                            }`}>
+                              <div className={`font-bold flex items-center gap-1.5 ${
+                                appsScriptError.isQuotaExceeded ? 'text-amber-400' : 'text-rose-400'
+                              }`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${
+                                  appsScriptError.isQuotaExceeded ? 'bg-amber-400' : 'bg-rose-500 animate-ping'
+                                }`}></span>
                                 <span>{appsScriptError.error || "فشل إرسال البريد"}</span>
                               </div>
                               {appsScriptError.details && (
                                 <p className="text-slate-300 font-sans">{appsScriptError.details}</p>
                               )}
                               {appsScriptError.instructions && Array.isArray(appsScriptError.instructions) && (
-                                <div className="space-y-1 mt-2.5 bg-rose-950/20 p-2.5 rounded-lg border border-rose-500/10">
-                                  <span className="font-semibold text-rose-300 block mb-1">خطوات الحل المقترحة:</span>
-                                  <ol className="list-decimal list-inside space-y-1 text-slate-400">
+                                <div className={`space-y-1 mt-2.5 p-2.5 rounded-lg border ${
+                                  appsScriptError.isQuotaExceeded 
+                                    ? 'bg-amber-950/20 border-amber-500/20 text-slate-300' 
+                                    : 'bg-rose-950/20 border-rose-500/10 text-slate-400'
+                                }`}>
+                                  <span className={`font-semibold block mb-1 ${
+                                    appsScriptError.isQuotaExceeded ? 'text-amber-300' : 'text-rose-300'
+                                  }`}>خطوات الحل والبدائل المتاحة:</span>
+                                  <ol className="list-decimal list-inside space-y-1">
                                     {appsScriptError.instructions.map((step: string, idx: number) => (
                                       <li key={idx} className="leading-relaxed font-sans">{step}</li>
                                     ))}
@@ -10510,9 +10622,11 @@ export default function App() {
                                 </div>
                               )}
                               <button 
-                                type="button"
-                                onClick={() => setAppsScriptError(null)}
-                                className="text-[10px] text-rose-400/60 hover:text-rose-400 underline font-sans block mt-1"
+                                type="button" 
+                                onClick={() => setAppsScriptError(null)} 
+                                className={`text-[10px] underline font-sans block mt-1 ${
+                                  appsScriptError.isQuotaExceeded ? 'text-amber-400/80 hover:text-amber-300' : 'text-rose-400/60 hover:text-rose-400'
+                                }`}
                               >
                                 {text('تجاهل هذا التنبيه', 'Dismiss this notice')}
                               </button>

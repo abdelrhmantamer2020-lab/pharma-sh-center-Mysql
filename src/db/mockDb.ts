@@ -1333,20 +1333,67 @@ export const DbService = {
     const now = Date.now();
     const EXPIRY_MS = 90000; // 90 seconds timeout for stale sessions
 
-    // 1. Authoritative Cloud Firestore Check (Works cross-browser, cross-device, Cloudflare Pages & Dev)
+    // Authoritative bypass for Developer and Admin:
+    // Developer (tmrbe2006@gmail.com) and Admin have instant takeover rights to terminate any stale/lingering sessions
+    const isPrivileged = cleanEmail === 'tmrbe2006@gmail.com' || session.userRole === 'developer' || session.userRole === 'admin';
+    const effectiveForce = force || isPrivileged;
+
+    const fullSessionRecord = {
+      ...session,
+      userEmail: cleanEmail,
+      lastHeartbeat: new Date().toISOString(),
+      lastHeartbeatMs: now,
+      displaced: false
+    };
+
+    // FAST PATH: For privileged users (Developer & Admin) or forced takeover, never block UI or wait for remote network!
+    if (effectiveForce) {
+      // 1. Immediately register locally
+      const localSessions = this.getLocalActiveSessions();
+      localSessions[cleanEmail] = fullSessionRecord;
+      try {
+        localStorage.setItem('care_pharmacy_active_sessions', JSON.stringify(localSessions));
+      } catch (e) {}
+
+      // 2. Fire-and-forget sync to Firestore in background
+      if (isFirebaseConnected) {
+        withTimeout(setDoc(doc(db, "active_sessions", cleanEmail), fullSessionRecord), 4000)
+          .catch(e => console.warn("Background Firestore session sync:", e));
+      }
+
+      // 3. Fire-and-forget sync to server in background
+      try {
+        fetch('/api/sessions/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: cleanEmail,
+            userId: session.userId,
+            userName: session.userName,
+            userRole: session.userRole,
+            sessionId: session.sessionId,
+            force: true
+          }),
+          signal: (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) ? (AbortSignal as any).timeout(2500) : undefined
+        }).catch(() => {});
+      } catch (e) {}
+
+      return { success: true, session: fullSessionRecord };
+    }
+
+    // REGULAR PATH (for non-privileged roles): check conflicts with strict 2-second timeout
     if (isFirebaseConnected) {
       try {
         const sessionRef = doc(db, "active_sessions", cleanEmail);
-        const snap = await getDoc(sessionRef);
-        if (snap.exists()) {
+        const snap = await withTimeout(getDoc(sessionRef), 2000);
+        if (snap && snap.exists()) {
           const remoteData = snap.data() as any;
           if (remoteData && remoteData.sessionId && remoteData.sessionId !== session.sessionId) {
             const lastHb = typeof remoteData.lastHeartbeatMs === 'number'
               ? remoteData.lastHeartbeatMs
               : (remoteData.lastHeartbeat ? new Date(remoteData.lastHeartbeat).getTime() : 0);
 
-            // If another session is alive and not forcing takeover, BLOCK LOGIN!
-            if ((now - lastHb < EXPIRY_MS) && !force) {
+            if (now - lastHb < EXPIRY_MS) {
               return {
                 success: false,
                 conflict: true,
@@ -1370,7 +1417,7 @@ export const DbService = {
       }
     }
 
-    // 2. Try server API (cross-device & server-backed sync)
+    // Server API check with 2s timeout
     try {
       const res = await fetch('/api/sessions/claim', {
         method: 'POST',
@@ -1381,23 +1428,22 @@ export const DbService = {
           userName: session.userName,
           userRole: session.userRole,
           sessionId: session.sessionId,
-          force: force
-        })
+          force: false
+        }),
+        signal: (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) ? (AbortSignal as any).timeout(2000) : undefined
       });
       if (!res.ok && res.status === 409) {
         const data = await res.json();
         return { success: false, conflict: true, activeSession: data.activeSession };
       }
-    } catch (e) {
-      // Server unreachable (e.g. static Cloudflare Pages hosting)
-    }
+    } catch (e) {}
 
-    // 3. LocalStorage fallback
+    // LocalStorage check
     const localSessions = this.getLocalActiveSessions();
     const existing = localSessions[cleanEmail];
     if (existing && existing.sessionId !== session.sessionId) {
       const lastHb = new Date(existing.lastHeartbeat).getTime();
-      if ((now - lastHb < EXPIRY_MS) && !force) {
+      if (now - lastHb < EXPIRY_MS) {
         return {
           success: false,
           conflict: true,
@@ -1406,28 +1452,16 @@ export const DbService = {
       }
     }
 
-    // 4. Claim and register this session
-    const fullSessionRecord = {
-      ...session,
-      userEmail: cleanEmail,
-      lastHeartbeat: new Date().toISOString(),
-      lastHeartbeatMs: now,
-      displaced: false
-    };
-
     // Register locally
     localSessions[cleanEmail] = fullSessionRecord;
     try {
       localStorage.setItem('care_pharmacy_active_sessions', JSON.stringify(localSessions));
     } catch (e) {}
 
-    // Firestore authoritative registration
+    // Firestore registration in background
     if (isFirebaseConnected) {
-      try {
-        await setDoc(doc(db, "active_sessions", cleanEmail), fullSessionRecord);
-      } catch (e) {
-        console.warn("Failed to set active session in Firestore:", e);
-      }
+      withTimeout(setDoc(doc(db, "active_sessions", cleanEmail), fullSessionRecord), 4000)
+        .catch(e => console.warn("Failed background setDoc in Firestore:", e));
     }
 
     return { success: true, session: fullSessionRecord };
@@ -1539,17 +1573,32 @@ export const DbService = {
     }
   },
 
-  // Real-time listener for instant cross-browser displacement
+  // Real-time listener for instant cross-browser displacement with Grace Period
   subscribeToActiveSession(email: string, currentSessionId: string, onDisplaced: (msg: string) => void): (() => void) {
     const cleanEmail = email.trim().toLowerCase();
     if (!isFirebaseConnected) return () => {};
+
+    const subscriptionTime = Date.now();
+    let hasAcknowledgedCurrent = false;
 
     try {
       const unsub = onSnapshot(doc(db, "active_sessions", cleanEmail), (snap) => {
         if (snap.exists()) {
           const data = snap.data();
-          if (data && data.sessionId && data.sessionId !== currentSessionId) {
-            onDisplaced('تم تسجيل الدخول لهذا الحساب من متصفح أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع ازدواجية الدخول.');
+          if (data && data.sessionId) {
+            if (data.sessionId === currentSessionId) {
+              // Current session is verified and active in Firestore
+              hasAcknowledgedCurrent = true;
+            } else {
+              // Different session ID detected
+              const elapsed = Date.now() - subscriptionTime;
+              // Grace period: within 4 seconds of subscription, if current session has not been acknowledged yet,
+              // ignore stale/cached snapshots from prior sessions to allow new session registration to settle.
+              if (!hasAcknowledgedCurrent && elapsed < 4000) {
+                return;
+              }
+              onDisplaced('تم تسجيل الدخول لهذا الحساب من متصفح أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع ازدواجية الدخول.');
+            }
           }
         }
       }, (err) => {
