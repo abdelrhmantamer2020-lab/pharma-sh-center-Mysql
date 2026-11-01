@@ -1188,7 +1188,7 @@ export const DbService = {
       dispensedAt: new Date().toISOString()
     };
 
-    // Subtract from inventory quantity automatically (inventory integrity!)
+    // 1. Subtract from inventory quantity immediately in local storage (inventory integrity!)
     const medList = getLocalMedicines();
     const medIndex = medList.findIndex(m => m.id === rec.medicineId);
     let previousQuantity = 0;
@@ -1204,23 +1204,29 @@ export const DbService = {
       medList[medIndex].updatedAt = new Date().toISOString();
       saveLocalMedicines(medList);
 
-      // Attempt syncing medicine reduction to Firebase
-      try {
-        if (isFirebaseConnected) {
-          await setDoc(doc(db, "medicines", rec.medicineId), {
+      // Attempt syncing medicine reduction to Firebase in non-blocking background
+      if (isFirebaseConnected) {
+        withTimeout(
+          setDoc(doc(db, "medicines", rec.medicineId), {
             quantity: newQty,
             updatedAt: medList[medIndex].updatedAt
-          }, { merge: true });
-        }
-      } catch (e) {
-        console.warn("Firestore inventory sync failed:", e);
+          }, { merge: true }),
+          2500
+        ).catch(e => {
+          console.warn("Firestore inventory sync background warning:", e);
+        });
       }
     }
 
-    // Write dispense record to Firebase
-    try {
-      if (isFirebaseConnected) {
-        await setDoc(doc(db, "dispense_records", newRec.id), {
+    // 2. Immediately save dispense record locally
+    const list = getLocalDispenses();
+    list.unshift(newRec);
+    saveLocalDispenses(list);
+
+    // 3. Attempt syncing dispense record to Firebase in non-blocking background
+    if (isFirebaseConnected) {
+      withTimeout(
+        setDoc(doc(db, "dispense_records", newRec.id), {
           medicineId: newRec.medicineId,
           medicineName: newRec.medicineName,
           medicineNameEn: newRec.medicineNameEn || '',
@@ -1234,19 +1240,16 @@ export const DbService = {
           dispensedBy: newRec.dispensedBy,
           dispensedById: newRec.dispensedById,
           dispensedAt: newRec.dispensedAt
-        });
-      }
-    } catch (e) {
-      console.warn("Firestore addDispenseRecord failed, falling back to LocalStorage:", e);
+        }),
+        2500
+      ).catch(e => {
+        console.warn("Firestore addDispenseRecord background warning:", e);
+      });
     }
 
-    const list = getLocalDispenses();
-    list.unshift(newRec);
-    saveLocalDispenses(list);
-
-    // Automatically record an Audit Log for the dispensing
+    // 4. Automatically record an Audit Log for the dispensing
     if (targetMed) {
-      await this.addStockLog({
+      this.addStockLog({
         medicineId: targetMed.id,
         medicineName: `${targetMed.commercialName} (${targetMed.scientificName})`,
         actionType: 'صرف دواء لمستفيد',
@@ -1257,7 +1260,7 @@ export const DbService = {
         performedByEmail: "pharmacist@carecenter.com",
         performedById: rec.dispensedById,
         notes: `صرف علاج للمستفيد: ${rec.residentName}`
-      });
+      }).catch(err => console.warn("Stock log warning:", err));
     }
 
     return newRec;
@@ -1646,9 +1649,15 @@ export const DbService = {
       timestamp: new Date().toISOString()
     };
 
-    try {
-      if (isFirebaseConnected) {
-        await setDoc(doc(db, "stock_audit_logs", newLog.id), {
+    // 1. Immediately save to local storage
+    const list = getLocalStockLogs();
+    list.unshift(newLog);
+    saveLocalStockLogs(list);
+
+    // 2. Sync to Firestore in non-blocking background
+    if (isFirebaseConnected) {
+      withTimeout(
+        setDoc(doc(db, "stock_audit_logs", newLog.id), {
           medicineId: newLog.medicineId,
           medicineName: newLog.medicineName,
           actionType: newLog.actionType,
@@ -1660,15 +1669,13 @@ export const DbService = {
           performedById: newLog.performedById,
           notes: newLog.notes,
           timestamp: newLog.timestamp
-        });
-      }
-    } catch (e) {
-      console.warn("Firestore addStockLog failed, saving locally:", e);
+        }),
+        2500
+      ).catch(e => {
+        console.warn("Firestore addStockLog background warning:", e);
+      });
     }
 
-    const list = getLocalStockLogs();
-    list.unshift(newLog);
-    saveLocalStockLogs(list);
     return newLog;
   },
 
@@ -2245,16 +2252,40 @@ export const DbService = {
     });
   },
 
+  async syncSingleResident(resident: any): Promise<void> {
+    const resWithId = {
+      ...resident,
+      id: resident.id || "res-" + Math.random().toString(36).substr(2, 9)
+    };
+    const current = getLocalResidents();
+    const idx = current.findIndex(r => r.id === resWithId.id);
+    if (idx !== -1) {
+      current[idx] = resWithId;
+    } else {
+      current.push(resWithId);
+    }
+    saveLocalResidents(current);
+
+    // Sync only this single resident doc to Firestore in background
+    if (isFirebaseConnected) {
+      withTimeout(
+        setDoc(doc(db, "residents", resWithId.id), resWithId),
+        2500
+      ).catch(e => {
+        console.warn("Firestore single resident sync background warning:", e);
+      });
+    }
+  },
+
   async syncAllResidents(list: any[]): Promise<void> {
     saveLocalResidents(list);
-    try {
-      if (isFirebaseConnected) {
-        await Promise.allSettled(
-          list.map(r => setDoc(doc(db, "residents", r.id), r))
-        );
-      }
-    } catch (e) {
-      console.warn("Firestore syncAllResidents failed:", e);
+    if (isFirebaseConnected) {
+      withTimeout(
+        Promise.allSettled(list.map(r => setDoc(doc(db, "residents", r.id), r))),
+        3000
+      ).catch(e => {
+        console.warn("Firestore syncAllResidents background warning:", e);
+      });
     }
   },
 

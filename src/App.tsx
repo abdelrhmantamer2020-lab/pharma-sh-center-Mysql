@@ -3570,21 +3570,33 @@ export default function App() {
         unit: dispenseForm.unit || med.unit,
         totalPrice: totalCost,
         actualQuantityDispensed: Number(dispenseForm.actualQuantityDispensed),
-        dispensedBy: currentUser.name,
-        dispensedById: currentUser.uid,
+        dispensedBy: currentUser?.name || "الصيدلي المناوب",
+        dispensedById: currentUser?.uid || "pharmacist-1",
         doctorId: selectedDoctor?.id || '',
         doctorName: selectedDoctor ? (lang === 'en' ? (selectedDoctor.nameEn || selectedDoctor.nameAr) : selectedDoctor.nameAr) : '',
         doctorNameEn: selectedDoctor?.nameEn || '',
         doctorSpecialty: selectedDoctor?.specialty || ''
       });
 
-      // Update state
-      setDispenseRecords(prev => [record, ...prev]);
-      // Sync local medicines list and refresh audit logs
-      loadAllData();
+      // 1. Optimistically deduct quantity from medicines state immediately
+      const dispensedQty = Number(dispenseForm.actualQuantityDispensed);
+      setMedicines(prev => prev.map(m => {
+        if (m.id === med.id) {
+          const newQ = Math.max(0, Math.round((m.quantity - dispensedQty) * 10000) / 10000);
+          return { ...m, quantity: newQ, updatedAt: new Date().toISOString() };
+        }
+        return m;
+      }));
 
+      // 2. Update dispenseRecords state immediately
+      setDispenseRecords(prev => [record, ...prev]);
+
+      // 3. Close modal and show success toast immediately
       setShowDispenseModal(false);
       showToast(`تم تسجيل عملية صرف الدواء ومراجعة الكمية المصروفة فعلياً بنجاح للمستفيد: ${dispenseForm.residentName}${selectedDoctor ? ` بإشراف: ${selectedDoctor.nameAr}` : ''}`, 'success');
+
+      // 4. Non-blocking background data refresh
+      loadAllData().catch(() => {});
 
       // Reset
       setDispenseForm({
@@ -4886,10 +4898,20 @@ export default function App() {
         dispensedById: currentUser?.uid || "pharmacist-1"
       });
 
-      // 6. Update local dispenseRecords state
+      // 6. Update local dispenseRecords state immediately
       setDispenseRecords(prev => [record, ...prev]);
 
-      // 7. Update resident schedule and lock for today
+      // 7. Optimistically deduct quantity from medicines state immediately
+      setMedicines(prev => prev.map(m => {
+        if (m.id === med.id) {
+          const newQ = Math.max(0, Math.round((m.quantity - qtyToDispense) * 10000) / 10000);
+          return { ...m, quantity: newQ, updatedAt: new Date().toISOString() };
+        }
+        return m;
+      }));
+
+      // 8. Update resident schedule and lock for today
+      let targetResidentToSync: any = null;
       const updatedResidents = residents.map(r => {
         if (r.id === residentId) {
           const sched = (r.dosageSchedule || []).map((item: any) => {
@@ -4907,16 +4929,21 @@ export default function App() {
             return item;
           });
           const updatedResident = { ...r, dosageSchedule: sched };
+          targetResidentToSync = updatedResident;
           setActiveDossierResident(updatedResident);
           return updatedResident;
         }
         return r;
       });
 
-      updateResidentsList(updatedResidents);
+      // Update residents state and local storage immediately
+      setResidents(updatedResidents);
+      saveLocalResidents(updatedResidents);
 
-      // 8. Refresh all data so inventory counts and stock audit logs reflect immediately in all tabs
-      await loadAllData();
+      // Non-blocking sync for only this single resident to Firestore (prevents 146 bulk writes)
+      if (targetResidentToSync) {
+        DbService.syncSingleResident(targetResidentToSync).catch(() => {});
+      }
 
       showToast(
         text(
@@ -4925,6 +4952,9 @@ export default function App() {
         ),
         "success"
       );
+
+      // Non-blocking background data refresh
+      loadAllData().catch(() => {});
 
     } catch (err: any) {
       showToast(text(`فشل تسجيل صرف الجرعة: ${err.message}`, `Failed to dispense dose: ${err.message}`), "error");
