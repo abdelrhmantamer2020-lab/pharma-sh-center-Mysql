@@ -8,3 +8,14 @@ bun.lock
 bun.lockb
 .env*
 !.env.example
+
+.worker-build/
+.wrangler/
+*.deb
+*.patch
+*.zip
+backups/
+*.sql.gz
+
+!.env.freesql.example
+.worker-build-mysql55/

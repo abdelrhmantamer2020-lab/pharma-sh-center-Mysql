@@ -1,60 +1,7 @@
+// Legacy Firebase access is not used by this MySQL build. Do not deploy during export.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow public read/write access to all pharmacy and clinical collections
-    match /batches/{batchId} {
-      allow read, write: if true;
-    }
-    match /medicines/{medicineId} {
-      allow read, write: if true;
-    }
-    match /dispense_records/{recordId} {
-      allow read, write: if true;
-    }
-    match /residents/{residentId} {
-      allow read, write: if true;
-    }
-    match /pharmaceutical_companies/{companyId} {
-      allow read, write: if true;
-    }
-    match /companies/{companyId} {
-      allow read, write: if true;
-    }
-    match /behavior_logs/{logId} {
-      allow read, write: if true;
-    }
-    match /custom_side_effects/{effectId} {
-      allow read, write: if true;
-    }
-    match /user_sessions/{sessionId} {
-      allow read, write: if true;
-    }
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-    match /stock_audit_logs/{logId} {
-      allow read, write: if true;
-    }
-    match /security_settings/{settingId} {
-      allow read, write: if true;
-    }
-    match /system_settings/{settingId} {
-      allow read, write: if true;
-    }
-    match /settings/{settingId} {
-      allow read, write: if true;
-    }
-    match /item_units/{unitId} {
-      allow read, write: if true;
-    }
-    match /therapeutic_categories/{categoryId} {
-      allow read, write: if true;
-    }
-    match /active_sessions/{sessionId} {
-      allow read, write: if true;
-    }
-    match /doctors/{doctorId} {
-      allow read, write: if true;
-    }
+    match /{document=**} { allow read, write: if false; }
   }
 }

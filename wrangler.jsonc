@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pharma-sh-center",
+  "main": "backend/worker.ts",
+  "compatibility_date": "2026-11-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "./dist", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "hyperdrive": [{"binding":"HYPERDRIVE","id":"REPLACE_WITH_YOUR_HYPERDRIVE_ID"}],
+  "vars": {"CENTER_TIMEZONE":"Asia/Riyadh"},
+  "observability": {"enabled":true}
+}
