@@ -40,8 +40,8 @@ export const OfflineIndicator: React.FC<{ lang?: 'ar' | 'en' }> = ({ lang }) => 
       <WifiOff className="w-4 h-4 text-amber-100" />
       <span>
         {currentLang === 'ar' 
-          ? 'أنت غير متصل بالإنترنت حالياً. يتم تشغيل النظام في وضع الحفظ الاحتياطي المحلي.' 
-          : 'You are currently offline. Running in local fallback mode.'}
+          ? 'تحقق من الاتصال بالخادم. لا يُعتمد الصرف أو الحفظ قبل تأكيد الخادم.'
+          : 'Check the server connection. Saving and dispensing require server confirmation.'}
       </span>
     </div>
   );

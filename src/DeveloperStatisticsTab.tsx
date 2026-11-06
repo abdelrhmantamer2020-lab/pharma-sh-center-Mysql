@@ -28,8 +28,8 @@ interface DeveloperStatisticsTabProps {
   text: (ar: string, en: string) => string;
   showToast: (msg: string, type: 'success' | 'error') => void;
   currentUser: any;
-  isFirebaseConnected: boolean;
-  firebaseProjectId: string;
+  isDatabaseConnected: boolean;
+  databaseName: string;
   onRefreshData?: () => Promise<void> | void;
   onExportBackup?: () => void;
 }
@@ -50,8 +50,8 @@ export const DeveloperStatisticsTab: React.FC<DeveloperStatisticsTabProps> = ({
   text,
   showToast,
   currentUser,
-  isFirebaseConnected,
-  firebaseProjectId,
+  isDatabaseConnected,
+  databaseName,
   onRefreshData,
   onExportBackup
 }) => {
@@ -361,10 +361,10 @@ export const DeveloperStatisticsTab: React.FC<DeveloperStatisticsTabProps> = ({
                 {currentUser?.name || text('المبرمج الرئيسي', 'Lead Developer')}
               </span>
               <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold flex items-center gap-1 ${
-                isFirebaseConnected ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                isDatabaseConnected ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
               }`}>
-                <span className={`w-2 h-2 rounded-full ${isFirebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-                {isFirebaseConnected ? text('Firestore سحابي متصل', 'Firestore Cloud Connected') : text('وضع التخزين المحلي', 'Local Storage Mode')}
+                <span className={`w-2 h-2 rounded-full ${isDatabaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                {isDatabaseConnected ? text('خادم البيانات متصل', 'Database server connected') : text('الخادم غير متاح', 'Server unavailable')}
               </span>
             </div>
             
@@ -658,12 +658,12 @@ export const DeveloperStatisticsTab: React.FC<DeveloperStatisticsTabProps> = ({
           <Database className="w-8 h-8 text-purple-400 shrink-0" />
           <div>
             <div className="text-[10px] text-slate-400 font-bold">{text('قاعدة البيانات', 'Database')}</div>
-            <div className="text-sm font-black text-purple-300 truncate max-w-[110px]" title={firebaseProjectId}>
-              {firebaseProjectId || 'Firestore'}
+            <div className="text-sm font-black text-purple-300 truncate max-w-[110px]" title={databaseName}>
+              {databaseName || 'MySQL'}
             </div>
             <div className="text-[10px] text-slate-400 flex items-center gap-1">
-              <span className={`w-1.5 h-1.5 rounded-full ${isFirebaseConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
-              <span>{isFirebaseConnected ? 'Online' : 'Local'}</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${isDatabaseConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+              <span>{isDatabaseConnected ? 'Online' : 'Local'}</span>
             </div>
           </div>
         </div>
@@ -1241,17 +1241,17 @@ export const DeveloperStatisticsTab: React.FC<DeveloperStatisticsTabProps> = ({
 
               <div className="space-y-3 text-xs">
                 <div className="p-3 rounded-2xl bg-slate-800/40 border border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-400">{text('حالة محرك Firestore:', 'Firestore Status:')}</span>
+                  <span className="text-slate-400">{text('حالة محرك MySQL:', 'MySQL Status:')}</span>
                   <span className={`px-2.5 py-1 rounded-full font-bold font-mono text-[11px] ${
-                    isFirebaseConnected ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    isDatabaseConnected ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                   }`}>
-                    {isFirebaseConnected ? 'CONNECTED (Cloud Ready)' : 'OFFLINE (Local Fallback)'}
+                    {isDatabaseConnected ? 'CONNECTED' : 'SERVER UNAVAILABLE'}
                   </span>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-slate-800/40 border border-slate-800 flex justify-between items-center">
-                  <span className="text-slate-400">{text('معرف مشروع Firebase:', 'Firebase Project ID:')}</span>
-                  <span className="font-mono font-bold text-slate-200">{firebaseProjectId || 'Not set'}</span>
+                  <span className="text-slate-400">{text('معرف مشروع MySQL:', 'MySQL Project ID:')}</span>
+                  <span className="font-mono font-bold text-slate-200">{databaseName || 'Not set'}</span>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-slate-800/40 border border-slate-800 flex justify-between items-center">

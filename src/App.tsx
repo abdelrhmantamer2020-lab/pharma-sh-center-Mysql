@@ -13,12 +13,14 @@ import {
   PieChart, Pie, Cell, AreaChart, Area
 } from 'recharts';
 import { DbService, Medicine, DispenseRecord, UserSession, ActiveSessionRecord, StockAuditLog, SecuritySettings, DEFAULT_SECURITY_SETTINGS, getLocalSecuritySettings, saveLocalSecuritySettings, DEFAULT_UNITS, DEFAULT_CATEGORIES, getLocalUnits, getLocalCategories, getLocalMedicines, getLocalDispenses, getLocalSessions, getLocalStockLogs, getLocalResidents, saveLocalResidents, getLocalCompanies, saveLocalCompanies, getLocalBehaviorLogs, saveLocalBehaviorLogs, getLocalCustomSideEffects, saveLocalCustomSideEffects, Doctor, getLocalDoctors, isMedicalSuppliesCategory } from './db/mockDb';
-import { isFirebaseConnected, firebaseConfig } from './firebase';
+import { useDatabaseStatus, databaseInfo } from './db/status';
+import { protectedFetch } from './db/protectedFetch';
 import { PWAInstallButton } from './PWAInstallButton';
 import { OfflineIndicator } from './OfflineIndicator';
 import { localizationData, Language } from './db/localization';
 import { SYSTEM_HELP_SECTIONS, ScreenGuide } from './helpManualData';
 import { generateMedicationPdfReports, PdfGenerationResult } from './utils/pdfReportGenerator';
+import {RecordPager,pageRows,pageIndex,RECORD_PAGE_SIZE} from './RecordPager';
 import { DeveloperStatisticsTab } from './DeveloperStatisticsTab';
 
 // User roles and permission matrix
@@ -728,6 +730,11 @@ export const generateReferralAlertsReports = (residentsList: any[]) => {
 };
 
 export default function App() {
+  const isDatabaseConnected = useDatabaseStatus();
+  const editingMedicineVersion=useRef<number|undefined>(undefined);
+  const editingDoctorVersion=useRef<number|undefined>(undefined);
+  const editingUserVersion=useRef<number|undefined>(undefined);
+
   // Global State
   const [medicines, setMedicines] = useState<Medicine[]>(() => getLocalMedicines());
   const [dispenseRecords, setDispenseRecords] = useState<DispenseRecord[]>(() => getLocalDispenses());
@@ -735,6 +742,8 @@ export default function App() {
   const [stockLogs, setStockLogs] = useState<StockAuditLog[]>(() => getLocalStockLogs());
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [dispensePage,setDispensePage]=useState(0);
+  const [auditPage,setAuditPage]=useState(0);
   const [darkMode, setDarkMode] = useState(true);
   const [skin, setSkin] = useState<SkinId>(() => {
     try {
@@ -867,107 +876,24 @@ export default function App() {
   });
 
   // User Accounts State with localStorage persistence
-  const [users, setUsers] = useState<any[]>(() => {
-    const defaultUsers = [
-      {
-        uid: "user-tmrbe",
-        name: "م. تامر (المبرمج)",
-        email: "tmrbe2006@gmail.com",
-        role: "developer",
-        phone: "+966500001122",
-        password: "tmrbe2006"
-      },
-      {
-        uid: "user-100",
-        name: "م. عبد الرحمن (المبرمج)",
-        email: "dev@carecenter.org",
-        role: "developer",
-        phone: "+966500001122",
-        password: "dev"
-      },
-      {
-        uid: "user-101",
-        name: "مدير النظام",
-        email: "admin@carecenter.org",
-        role: "admin",
-        phone: "+966501234567",
-        password: "admin"
-      },
-      {
-        uid: "user-102",
-        name: "صيدلي. كريم القحطاني",
-        email: "kareem.q@carecenter.org",
-        role: "pharmacist",
-        phone: "+966507654321",
-        password: "pharm"
-      },
-      {
-        uid: "user-103",
-        name: "فني. ماجد الرويلي",
-        email: "majed.r@carecenter.org",
-        role: "technician",
-        phone: "+966509998887",
-        password: "tech"
-      }
-    ];
-
-    try {
-      const saved = localStorage.getItem('care_pharmacy_all_users');
-      let list = saved ? JSON.parse(saved) : defaultUsers;
-      if (Array.isArray(list)) {
-        const tmrbeIdx = list.findIndex((u: any) => u.email?.toLowerCase() === 'tmrbe2006@gmail.com');
-        if (tmrbeIdx !== -1) {
-          list[tmrbeIdx] = { 
-            ...list[tmrbeIdx], 
-            role: 'developer',
-            password: (list[tmrbeIdx].password === 'dev' || !list[tmrbeIdx].password) ? 'tmrbe2006' : list[tmrbeIdx].password
-          };
-        } else {
-          list = [defaultUsers[0], ...list];
-        }
-        if (!list.some((u: any) => u.role === 'developer')) {
-          list = [defaultUsers[0], ...list];
-        }
-        try { localStorage.setItem('care_pharmacy_all_users', JSON.stringify(list)); } catch (e) {}
-      }
-      return list;
-    } catch {
-      return defaultUsers;
-    }
-  });
+  const [users, setUsers] = useState<any[]>([]);
 
   const updateResidentsList = async (newList: any[]) => {
-    setResidents(newList);
-    saveLocalResidents(newList);
-    try {
-      await DbService.syncAllResidents(newList);
-    } catch (e) {
-      console.warn("Failed to sync residents with database:", e);
-    }
+    try { await DbService.syncAllResidents(newList);setResidents(getLocalResidents());return true; }
+    catch {return false;}
   };
 
-  const updateUsersList = (newList: any[]) => {
-    setUsers(newList);
-    localStorage.setItem('care_pharmacy_all_users', JSON.stringify(newList));
-  };
-  
-  // Security & Authentication State
-  const [currentUser, setCurrentUser] = useState<any | null>(() => {
-    try {
-      const saved = localStorage.getItem('care_pharmacy_user');
-      if (saved) {
-        const u = JSON.parse(saved);
-        if (u.email?.toLowerCase() === 'tmrbe2006@gmail.com') {
-          u.role = 'developer';
-          try { localStorage.setItem('care_pharmacy_user', JSON.stringify(u)); } catch (e) {}
-        }
-        return u;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
+  const updateUsersList = (newList: any[]) => setUsers(newList.map(({password, passwordHash, ...u})=>u));
+  const [currentUser, setCurrentUser] = useState<any | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  useEffect(() => {
+    let active=true;
+    // Remove legacy clinical caches and plaintext credentials from previous versions.
+    for(const key of Object.keys(localStorage)) if(key.startsWith('care_pharmacy_') && !['care_pharmacy_skin','care_pharmacy_lang','care_pharmacy_last_dark_skin','care_pharmacy_sidebar_open'].includes(key)) localStorage.removeItem(key);
+    for(const key of ['ultraMsgToken','waPilotApiKey','callMeBotApiKey'])localStorage.removeItem(key);
+    DbService.me().then(r=>{if(active)setCurrentUser(r.user);}).catch(()=>{}).finally(()=>{if(active)setAuthChecking(false);});
+    return()=>{active=false;};
+  },[]);
 
   // Login Screen states
   const [loginEmail, setLoginEmail] = useState('');
@@ -1060,7 +986,7 @@ export default function App() {
     };
   }, [showActionGroup]);
 
-  // Settings state: alertDays with persistent localStorage & Firestore sync
+  // Settings state: alertDays with persistent localStorage & MySQL sync
   const [alertDays, setAlertDays] = useState<number>(() => {
     const localDays = localStorage.getItem('care_pharmacy_alert_days');
     if (localDays && !isNaN(Number(localDays)) && Number(localDays) >= 5) return Number(localDays);
@@ -1107,19 +1033,19 @@ export default function App() {
     return (localStorage.getItem('whatsAppMode') as any) || 'manual';
   });
   const [ultraMsgInstance, setUltraMsgInstance] = useState(() => {
-    return localStorage.getItem('ultraMsgInstance') || 'instance98412';
+    return '';
   });
   const [ultraMsgToken, setUltraMsgToken] = useState(() => {
-    return localStorage.getItem('ultraMsgToken') || 'tkn_998348123984axcd';
+    return '';
   });
   const [callMeBotApiKey, setCallMeBotApiKey] = useState(() => {
-    return localStorage.getItem('callMeBotApiKey') || '';
+    return '';
   });
   const [waPilotBaseUrl, setWaPilotBaseUrl] = useState(() => {
     return localStorage.getItem('waPilotBaseUrl') || 'https://api.wapilot.io';
   });
   const [waPilotApiKey, setWaPilotApiKey] = useState(() => {
-    return localStorage.getItem('waPilotApiKey') || '';
+    return '';
   });
   const [waPilotType, setWaPilotType] = useState<'wapilot' | 'wapilot_net' | 'wautopilot'>(() => {
     return (localStorage.getItem('waPilotType') as any) || 'wapilot';
@@ -1143,7 +1069,7 @@ export default function App() {
     return getLocalSecuritySettings().appsScriptUrl || 'AKfycbwES7mkB6q2gKtiKDbUOHIBZeLruWaE8zROrFasOHjtWXcsklq8yZZDRCDYQJVJVru4og/exec';
   });
   const [notificationEmail, setNotificationEmail] = useState(() => {
-    return getLocalSecuritySettings().notificationEmail || 'tmrbe2006@gmail.com, rooq113@gmail.com, abdelrahim.mahjob@gmail.com';
+    return getLocalSecuritySettings().notificationEmail || '';
   });
   const [appsScriptError, setAppsScriptError] = useState<any | null>(null);
   const [emailPreviewLang, setEmailPreviewLang] = useState<'ar' | 'en'>('ar');
@@ -1175,9 +1101,9 @@ export default function App() {
         email: currentUser?.email || 'tmrbe2006@gmail.com'
       });
       setSecSettingsState(updated);
-      showToast(text('تم حفظ إعدادات الحماية والأمان وقنوات الاتصال سحابياً في قاعدة بيانات Firebase بنجاح! ☁️🔒', 'Security and gateway settings saved to Firebase Cloud Firestore successfully! ☁️🔒'), 'success');
+      showToast(text('تم حفظ إعدادات الحماية والأمان وقنوات الاتصال سحابياً في قاعدة بيانات MySQL بنجاح! ☁️🔒', 'Security and gateway settings saved to MySQL Cloud MySQL successfully! ☁️🔒'), 'success');
     } catch (err: any) {
-      console.error('Failed saving security settings to Firebase:', err);
+      console.error('Failed saving security settings to MySQL:', err);
       showToast(text(`فشل حفظ الإعدادات في قاعدة البيانات: ${err.message}`, `Failed saving settings to DB: ${err.message}`), 'error');
     } finally {
       setSavingSecSettings(false);
@@ -1247,8 +1173,8 @@ export default function App() {
       const totalDocs = backup.counts?.totalDocuments || Object.values(backup.counts || {}).reduce((a: any, b: any) => typeof b === 'number' ? a + b : a, 0);
       showToast(
         text(
-          `تم بنجاح أخذ نسخة احتياطية شاملة لكافة جداول قاعدة البيانات (${totalDocs} وثيقة عبر كافة مجموعات Firebase)! 💾📥`,
-          `Complete backup of all Firebase collections downloaded successfully (${totalDocs} documents)! 💾📥`
+          `تم تصدير بيانات البرنامج (بدون كلمات المرور والجلسات النشطة) (${totalDocs} وثيقة عبر كافة مجموعات MySQL)! 💾📥`,
+          `Clinical data backup downloaded (credentials excluded) (${totalDocs} documents)! 💾📥`
         ),
         'success'
       );
@@ -1299,8 +1225,8 @@ export default function App() {
       await loadAllData();
       showToast(
         text(
-          `تمت استعادة كافة جداول الداتابيز سحابياً ومحلياً بنجاح! (${result.counts.total} وثيقة تشمل: ${result.counts.residents} مستفيد، ${result.counts.stock_audit_logs} تدقيق، ${result.counts.user_sessions} جلسة، ${result.counts.dispense_records} صرف، ${result.counts.batches} تشغيلة، ${result.counts.item_units} وحدة، ${result.counts.therapeutic_categories} فئة) 🔄🎉`,
-          `Database restored successfully to cloud and local cache! (${result.counts.total} documents across all tables) 🔄🎉`
+          `تم استيراد البيانات بنجاح (حسابات الدخول لم تتغير). (${Object.values(result.counts).reduce((a: number,b: any)=>a+Number(b),0)} وثيقة تشمل: ${result.counts.residents} مستفيد، ${result.counts.stock_audit_logs} تدقيق، ${result.counts.user_sessions} جلسة، ${result.counts.dispense_records} صرف، ${result.counts.batches} تشغيلة، ${result.counts.item_units} وحدة، ${result.counts.therapeutic_categories} فئة) 🔄🎉`,
+          `Data imported successfully; login accounts were not changed. (${Object.values(result.counts).reduce((a: number,b: any)=>a+Number(b),0)} documents across all tables) 🔄🎉`
         ),
         'success'
       );
@@ -1335,10 +1261,10 @@ export default function App() {
   const [editingCategoryVal, setEditingCategoryVal] = useState('');
   const [newCategoryInputModal, setNewCategoryInputModal] = useState('');
 
-  // Unit CRUD handlers with Database (Firestore) persistence
+  // Unit CRUD handlers with Database (MySQL) persistence
   const handleCreateUnit = async (name: string) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية إضافة وحدات دوائية جديدة (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot add new units.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية إضافة وحدات دوائية جديدة (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot add new units.'), 'error');
       return;
     }
     const cleaned = name.trim();
@@ -1362,8 +1288,8 @@ export default function App() {
   };
 
   const handleUpdateUnit = async (index: number, newName: string) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية تعديل الوحدات الدوائية (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot edit units.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية تعديل الوحدات الدوائية (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot edit units.'), 'error');
       return;
     }
     const cleaned = newName.trim();
@@ -1382,14 +1308,7 @@ export default function App() {
       if (medForm.unit === oldUnit) {
         setMedForm(prev => ({ ...prev, unit: cleaned }));
       }
-      // Update any medicines in state & database that have this old unit
-      const affectedMeds = medicines.filter(m => m.unit === oldUnit);
-      if (affectedMeds.length > 0) {
-        for (const m of affectedMeds) {
-          await DbService.updateMedicine(m.id, { unit: cleaned });
-        }
-        loadAllData();
-      }
+      await loadAllData();
       setEditingUnitIdx(null);
       setEditingUnitVal('');
       showToast(text(`تم تعديل الوحدة في قاعدة البيانات وتحديث الأصناف المرتبطة بها!`, `Unit updated in database!`), 'success');
@@ -1399,8 +1318,8 @@ export default function App() {
   };
 
   const handleDeleteUnit = async (index: number) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية حذف الوحدات الدوائية (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot delete units.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية حذف الوحدات الدوائية (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot delete units.'), 'error');
       return;
     }
     if (customUnits.length <= 1) {
@@ -1421,22 +1340,17 @@ export default function App() {
       if (medForm.unit === targetUnit) {
         setMedForm(prev => ({ ...prev, unit: updated[0] }));
       }
-      if (affectedCount > 0) {
-        for (const m of medicines.filter(m => m.unit === targetUnit)) {
-          await DbService.updateMedicine(m.id, { unit: updated[0] });
-        }
-        loadAllData();
-      }
+      await loadAllData();
       showToast(text(`تم حذف الوحدة "${targetUnit}" من قاعدة البيانات بنجاح!`, `Unit "${targetUnit}" deleted from database!`), 'success');
     } catch (e) {
       showToast(text('فشل حذف الوحدة من قاعدة البيانات', 'Failed to delete unit from database'), 'error');
     }
   };
 
-  // Category CRUD handlers with Database (Firestore) persistence
+  // Category CRUD handlers with Database (MySQL) persistence
   const handleCreateCategory = async (name: string) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية إضافة فئات علاجية جديدة (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot add categories.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية إضافة فئات علاجية جديدة (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot add categories.'), 'error');
       return;
     }
     const cleaned = name.trim();
@@ -1460,8 +1374,8 @@ export default function App() {
   };
 
   const handleUpdateCategory = async (index: number, newName: string) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية تعديل الفئات العلاجية (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot edit categories.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية تعديل الفئات العلاجية (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot edit categories.'), 'error');
       return;
     }
     const cleaned = newName.trim();
@@ -1481,13 +1395,7 @@ export default function App() {
         setMedForm(prev => ({ ...prev, category: cleaned }));
       }
       // Update any medicines in state & database that have this old category
-      const affectedMeds = medicines.filter(m => m.category === oldCat);
-      if (affectedMeds.length > 0) {
-        for (const m of affectedMeds) {
-          await DbService.updateMedicine(m.id, { category: cleaned });
-        }
-        loadAllData();
-      }
+      await loadAllData();
       setEditingCategoryIdx(null);
       setEditingCategoryVal('');
       showToast(text(`تم تعديل الفئة في قاعدة البيانات وتحديث الأصناف المرتبطة بها!`, `Category updated in database!`), 'success');
@@ -1497,8 +1405,8 @@ export default function App() {
   };
 
   const handleDeleteCategory = async (index: number) => {
-    if (currentUser?.role === 'technician') {
-      showToast(text('ليس لديك صلاحية حذف الفئات العلاجية (مقتصرة على الصيدلي القانوني ومدير النظام).', 'Pharmacy technicians cannot delete categories.'), 'error');
+    if (!['developer','admin'].includes(currentUser?.role || '')) {
+      showToast(text('ليس لديك صلاحية حذف الفئات العلاجية (مقتصرة على المبرمج ومدير النظام).', 'Pharmacy technicians cannot delete categories.'), 'error');
       return;
     }
     if (customCategories.length <= 1) {
@@ -1519,12 +1427,7 @@ export default function App() {
       if (medForm.category === targetCat) {
         setMedForm(prev => ({ ...prev, category: updated[0] }));
       }
-      if (affectedCount > 0) {
-        for (const m of medicines.filter(m => m.category === targetCat)) {
-          await DbService.updateMedicine(m.id, { category: updated[0] });
-        }
-        loadAllData();
-      }
+      await loadAllData();
       showToast(text(`تم حذف الفئة "${targetCat}" من قاعدة البيانات بنجاح!`, `Category "${targetCat}" deleted from database!`), 'success');
     } catch (e) {
       showToast(text('فشل حذف الفئة من قاعدة البيانات', 'Failed to delete category from database'), 'error');
@@ -2165,7 +2068,7 @@ export default function App() {
 
       // 1. Try server-side proxy endpoint first
       try {
-        const res = await fetch('/api/notifications/send-email', {
+        const res = await protectedFetch('/api/notifications/send-email', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2208,7 +2111,7 @@ export default function App() {
         for (const url of urls) {
           try {
             const cleanUrl = url.startsWith('http') ? url : `https://script.google.com/macros/s/${url}`;
-            const resp = await fetch(cleanUrl, {
+            const resp = await protectedFetch(cleanUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'text/plain;charset=utf-8' },
               body: JSON.stringify({
@@ -2299,13 +2202,8 @@ export default function App() {
   });
 
   const updateBehaviorLogs = async (newList: any[]) => {
-    setBehaviorLogs(newList);
-    saveLocalBehaviorLogs(newList);
-    try {
-      await DbService.syncAllBehaviorLogs(newList);
-    } catch (e) {
-      console.warn("Failed to sync behavior logs with database:", e);
-    }
+    await DbService.syncAllBehaviorLogs(newList);
+    setBehaviorLogs(getLocalBehaviorLogs());
   };
 
   const [showAddBehaviorModal, setShowAddBehaviorModal] = useState(false);
@@ -2364,200 +2262,117 @@ export default function App() {
     });
   }, [medicines, auditMedicineSearch]);
 
-  const handleAddCustomSideEffect = (label: string) => {
+  const handleAddCustomSideEffect = async (label: string) => {
     const cleaned = label.trim();
     if (!cleaned) return;
     const key = "se-" + Date.now();
     const updated = [...customSideEffects, { key, label: cleaned }];
+    try {await DbService.saveCustomSideEffects(updated);}catch{return;}
     setCustomSideEffects(updated);
-    saveLocalCustomSideEffects(updated);
-    DbService.saveCustomSideEffects(updated).catch(() => {});
     showToast(text(`تمت إضافة العرض الجانبي: ${cleaned}`, `Side effect added: ${cleaned}`), 'success');
   };
 
-  const handleEditCustomSideEffect = (key: string, newLabel: string) => {
+  const handleEditCustomSideEffect = async (key: string, newLabel: string) => {
     const cleaned = newLabel.trim();
     if (!cleaned) return;
     const updated = customSideEffects.map(se => se.key === key ? { ...se, label: cleaned } : se);
+    try {await DbService.saveCustomSideEffects(updated);}catch{return;}
     setCustomSideEffects(updated);
-    saveLocalCustomSideEffects(updated);
-    DbService.saveCustomSideEffects(updated).catch(() => {});
     showToast(text('تم تعديل العرض الجانبي بنجاح', 'Side effect updated successfully'), 'success');
   };
 
-  const handleDeleteCustomSideEffect = (key: string) => {
+  const handleDeleteCustomSideEffect = async (key: string) => {
     const updated = customSideEffects.filter(se => se.key !== key);
+    try {await DbService.saveCustomSideEffects(updated);}catch{return;}
     setCustomSideEffects(updated);
-    saveLocalCustomSideEffects(updated);
-    DbService.saveCustomSideEffects(updated).catch(() => {});
     showToast(text('تم حذف العرض الجانبي', 'Side effect deleted successfully'), 'success');
   };
 
-  // Load Data with Instant Cache and Parallel Background Cloud Sync
-  const loadAllData = async () => {
-    // 1. Instant optimistic population from local storage (Zero wait time)
-    const localMeds = getLocalMedicines();
-    const localDisp = getLocalDispenses();
-    const localSess = getLocalSessions();
-    const localLogs = getLocalStockLogs();
-    const localUnits = getLocalUnits();
-    const localCats = getLocalCategories();
-    const localResidents = getLocalResidents();
-    const localCompanies = getLocalCompanies();
-    const localBehaviorLogs = getLocalBehaviorLogs();
-    const localSideEffects = getLocalCustomSideEffects();
-
-    if (localMeds !== undefined) setMedicines(localMeds);
-    if (localDisp !== undefined) setDispenseRecords(localDisp);
-    if (localSess !== undefined) setSessions(localSess);
-    if (localLogs !== undefined) setStockLogs(localLogs);
-    if (localUnits && localUnits.length > 0) setCustomUnits(localUnits);
-    if (localCats && localCats.length > 0) setCustomCategories(localCats);
-    if (localResidents !== undefined) setResidents(localResidents);
-    if (localCompanies !== undefined) setCompanies(localCompanies);
-    if (localBehaviorLogs !== undefined) setBehaviorLogs(localBehaviorLogs);
-    if (localSideEffects !== undefined) setCustomSideEffects(localSideEffects);
-
-    // Stop loading immediately so the screen is interactive and never hangs
-    setLoading(false);
-
-    try {
-      // 2. Fetch fresh updates from Firestore in parallel (non-blocking)
-      const [
-        medsRes, 
-        dispRes, 
-        sessRes, 
-        logsRes, 
-        usersRes,
-        residentsRes,
-        companiesRes,
-        behaviorLogsRes,
-        sideEffectsRes,
-        doctorsRes
-      ] = await Promise.allSettled([
-        DbService.fetchMedicines(),
-        DbService.fetchDispenseRecords(),
-        DbService.fetchSessions(),
-        DbService.fetchStockLogs(),
-        DbService.fetchUsers(),
-        DbService.fetchResidents(),
-        DbService.fetchCompanies(),
-        DbService.fetchBehaviorLogs(),
-        DbService.fetchCustomSideEffects(),
-        DbService.fetchDoctors()
-      ]);
-
-      const meds = medsRes.status === 'fulfilled' ? medsRes.value : localMeds;
-      const disp = dispRes.status === 'fulfilled' ? dispRes.value : localDisp;
-      const sess = sessRes.status === 'fulfilled' ? sessRes.value : localSess;
-      const logs = logsRes.status === 'fulfilled' ? logsRes.value : localLogs;
-      const loadedUsers = usersRes.status === 'fulfilled' ? usersRes.value : users;
-      const loadedResidents = residentsRes.status === 'fulfilled' ? residentsRes.value : localResidents;
-      const loadedCompanies = companiesRes.status === 'fulfilled' ? companiesRes.value : localCompanies;
-      const loadedBehaviorLogs = behaviorLogsRes.status === 'fulfilled' ? behaviorLogsRes.value : localBehaviorLogs;
-      const loadedSideEffects = sideEffectsRes.status === 'fulfilled' ? sideEffectsRes.value : localSideEffects;
-      const loadedDoctors = doctorsRes.status === 'fulfilled' ? doctorsRes.value : getLocalDoctors();
-
-      const ensuredUsers = loadedUsers.map((u: any) => 
-        u.email?.toLowerCase() === 'tmrbe2006@gmail.com' 
-          ? { ...u, role: 'developer', password: (u.password === 'dev' || !u.password) ? 'tmrbe2006' : u.password } 
-          : u
-      );
-      if (!ensuredUsers.some((u: any) => u.email?.toLowerCase() === 'tmrbe2006@gmail.com')) {
-        ensuredUsers.unshift({
-          uid: "user-tmrbe",
-          name: "م. تامر (المبرمج)",
-          email: "tmrbe2006@gmail.com",
-          role: "developer",
-          phone: "+966500001122",
-          password: "tmrbe2006"
-        });
+  // Snapshot reads share one request, skip unchanged tables and never overlap.
+  const activeUserRef=useRef<string|null>(null);activeUserRef.current=currentUser?.uid||null;
+  const activeTabRef=useRef(activeTab);activeTabRef.current=activeTab;
+  const loadStateRef=useRef<any>(null);
+  const requiredScopes=()=>{
+    const scopes=['core','history'];
+    if(['audit_logs','dev_statistics'].includes(activeTabRef.current))scopes.push('audit');
+    if(['users','security','dev_statistics'].includes(activeTabRef.current)&&['developer','admin'].includes(currentUser?.role||''))scopes.push('admin');
+    return scopes;
+  };
+  const loadAllData=async(options:{force?:boolean}={})=>{
+    const user=currentUser?.uid;if(!user)return;
+    let state=loadStateRef.current;
+    if(!state||state.user!==user)state=loadStateRef.current={user,known:{},loaded:new Set<string>(),running:null,reload:false};
+    const force=options.force!==false;
+    if(state.running){state.reload=state.reload||force;return state.running;}
+    const apply=(result:any)=>{
+      if(activeUserRef.current!==user)return;
+      const c=result.collections;
+      if(c.medicines)setMedicines(c.medicines);
+      if(c.residents)setResidents(c.residents);
+      if(c.doctors)setDoctors(c.doctors);
+      if(c.pharmaceutical_companies)setCompanies(c.pharmaceutical_companies);
+      if(c.dispense_records)setDispenseRecords(c.dispense_records);
+      if(c.behavior_logs)setBehaviorLogs(c.behavior_logs);
+      if(c.stock_audit_logs)setStockLogs(c.stock_audit_logs);
+      if(c.user_sessions)setSessions(c.user_sessions);
+      if(c.users)setUsers(c.users);
+      if(c.custom_side_effects)setCustomSideEffects(c.custom_side_effects);
+      if(c.item_units)setCustomUnits(c.item_units.map((u:any)=>u.name));
+      if(c.therapeutic_categories)setCustomCategories(c.therapeutic_categories.map((u:any)=>u.name));
+      if(c.security_settings){const sec=c.security_settings.find((d:any)=>d.id==='config')||DEFAULT_SECURITY_SETTINGS;
+      setSecSettingsState(sec);
+      if (sec.emailEnabled !== undefined) setEmailEnabled(sec.emailEnabled);
+      if (sec.appsScriptUrl !== undefined) setAppsScriptUrl(sec.appsScriptUrl);
+      if (sec.notificationEmail !== undefined) setNotificationEmail(sec.notificationEmail);
+      if (sec.whatsAppEnabled !== undefined) setWhatsAppEnabled(sec.whatsAppEnabled);
+      if (sec.whatsAppMode) setWhatsAppMode(sec.whatsAppMode as any);
+      if (sec.whatsAppNumber) setWhatsAppNumber(sec.whatsAppNumber);
+      if (sec.callMeBotApiKey !== undefined) setCallMeBotApiKey(sec.callMeBotApiKey);
+      if (sec.ultraMsgInstance !== undefined) setUltraMsgInstance(sec.ultraMsgInstance);
+      if (sec.ultraMsgToken !== undefined) setUltraMsgToken(sec.ultraMsgToken);
+      if (sec.waPilotBaseUrl) setWaPilotBaseUrl(sec.waPilotBaseUrl);
+      if (sec.waPilotApiKey !== undefined) setWaPilotApiKey(sec.waPilotApiKey);
+      if (sec.waPilotType) setWaPilotType(sec.waPilotType as any);
+      if (sec.waPilotDevice !== undefined) setWaPilotDevice(sec.waPilotDevice);
+      if (sec.waPilotPath) setWaPilotPath(sec.waPilotPath);
+      if (sec.alertDays) setAlertDays(sec.alertDays);
       }
-
-      setMedicines(meds);
-      setDispenseRecords(disp);
-      setSessions(sess);
-      setStockLogs(logs);
-      setUsers(ensuredUsers);
-      if (loadedResidents !== undefined) setResidents(loadedResidents);
-      if (loadedCompanies !== undefined) setCompanies(loadedCompanies);
-      if (loadedBehaviorLogs !== undefined) setBehaviorLogs(loadedBehaviorLogs);
-      if (loadedSideEffects !== undefined) setCustomSideEffects(loadedSideEffects);
-      if (loadedDoctors !== undefined && loadedDoctors.length > 0) setDoctors(loadedDoctors);
-
-      // Load Units and Categories directly from Database (Firestore) in parallel
+      Object.assign(state.known,result.revisions);
+    };
+    const task=async()=>{
+      state.error=null;
       try {
-        const [unitsRes, catsRes] = await Promise.allSettled([
-          DbService.fetchUnits(),
-          DbService.fetchCategories()
-        ]);
-        if (unitsRes.status === 'fulfilled' && unitsRes.value.length > 0) setCustomUnits(unitsRes.value);
-        if (catsRes.status === 'fulfilled' && catsRes.value.length > 0) setCustomCategories(catsRes.value);
-      } catch (err) {
-        console.warn('Failed to fetch units or categories from DB:', err);
-      }
-
-      // Load Security & Channel Settings from Firebase Firestore
-      try {
-        const sec = await DbService.fetchSecuritySettings();
-        setSecSettingsState(sec);
-        if (sec.emailEnabled !== undefined) setEmailEnabled(sec.emailEnabled);
-        if (sec.appsScriptUrl !== undefined) setAppsScriptUrl(sec.appsScriptUrl);
-        if (sec.notificationEmail !== undefined) setNotificationEmail(sec.notificationEmail);
-        if (sec.whatsAppEnabled !== undefined) setWhatsAppEnabled(sec.whatsAppEnabled);
-        if (sec.whatsAppMode) setWhatsAppMode(sec.whatsAppMode as any);
-        if (sec.whatsAppNumber) setWhatsAppNumber(sec.whatsAppNumber);
-        if (sec.callMeBotApiKey !== undefined) setCallMeBotApiKey(sec.callMeBotApiKey);
-        if (sec.ultraMsgInstance !== undefined) setUltraMsgInstance(sec.ultraMsgInstance);
-        if (sec.ultraMsgToken !== undefined) setUltraMsgToken(sec.ultraMsgToken);
-        if (sec.waPilotBaseUrl) setWaPilotBaseUrl(sec.waPilotBaseUrl);
-        if (sec.waPilotApiKey !== undefined) setWaPilotApiKey(sec.waPilotApiKey);
-        if (sec.waPilotType) setWaPilotType(sec.waPilotType as any);
-        if (sec.waPilotDevice !== undefined) setWaPilotDevice(sec.waPilotDevice);
-        if (sec.waPilotPath) setWaPilotPath(sec.waPilotPath);
-        if (sec.alertDays) setAlertDays(sec.alertDays);
-      } catch (secErr) {
-        console.warn("Could not load security settings from Firestore, using offline fallback:", secErr);
-      }
-
-      // If current active session is tmrbe2006@gmail.com, ensure developer role
-      setCurrentUser((prev: any) => {
-        if (prev && prev.email?.toLowerCase() === 'tmrbe2006@gmail.com' && prev.role !== 'developer') {
-          const updated = { ...prev, role: 'developer' };
-          try { localStorage.setItem('care_pharmacy_user', JSON.stringify(updated)); } catch (e) {}
-          return updated;
+        if(!state.loaded.has('core')){
+          setLoading(true);apply(await DbService.bootstrap(['core']));
+          if(activeUserRef.current!==user)return;state.loaded.add('core');setLoading(false);
         }
-        return prev;
-      });
-
-      // 1. Silent Daily Auto-Pilot Safety Dispatch (Checks once a day automatically with fresh medicines)
-      const todayStr = new Date().toDateString();
-      const lastDispatchedDate = localStorage.getItem('lastAutoAlertDispatchDate');
-      const isQuotaExceededToday = localStorage.getItem('appsScriptQuotaExceededDate') === todayStr;
-      if (!isQuotaExceededToday && lastDispatchedDate !== todayStr) {
-        setTimeout(() => {
-          triggerScheduledAlertsTest(true, meds).catch(() => {});
-          localStorage.setItem('lastAutoAlertDispatchDate', todayStr);
-        }, 4000);
-      }
-    } catch (e: any) {
-      console.warn('Background sync note:', e);
-    } finally {
-      setLoading(false);
-    }
+        do {
+          state.reload=false;
+          const scopes=requiredScopes();
+          apply(await DbService.bootstrap(scopes,state.known));
+          if(activeUserRef.current!==user)return;
+          scopes.forEach(scope=>state.loaded.add(scope));
+        } while(state.reload||requiredScopes().some(scope=>!state.loaded.has(scope)));
+      } catch(error:any){
+        state.error=error.message;
+        if(activeUserRef.current===user&&(force||!state.loaded.has('core')))showToast(error.message||'تعذر تحميل البيانات من الخادم','error');
+      } finally {if(activeUserRef.current===user)setLoading(false);state.running=null;}
+    };
+    state.running=task();return state.running;
   };
 
-  // Universal Database Cloud Sync Handler (Accessible to ALL users across the entire system)
+  // Universal Database Refresh data Handler (Accessible to ALL users across the entire system)
   const [isSyncingDb, setIsSyncingDb] = useState<boolean>(false);
   const handleManualSyncDb = async () => {
     if (isSyncingDb) return;
     setIsSyncingDb(true);
     try {
       await loadAllData();
+      if(loadStateRef.current?.error)throw new Error(loadStateRef.current.error);
       showToast(
         lang === 'ar' 
-          ? `تمت مزامنة وتحديث قاعدة البيانات سحابياً بنجاح! 🔄 (${medicines.length} صنف دواء مسجل)` 
-          : `Database synchronized successfully with Cloud! 🔄 (${medicines.length} items loaded)`, 
+          ? `تم تحديث البيانات من الخادم! 🔄 (${medicines.length} صنف دواء مسجل)`
+          : `Data refreshed from server. 🔄 (${medicines.length} items loaded)`,
         'success'
       );
     } catch (err) {
@@ -2573,40 +2388,27 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadAllData();
-
-    // 2. Silent Daily Auto-Pilot Resident Referral Alerts Dispatch (1-Day Prior Notice to Pharmacy Officials)
-    const todayStr = new Date().toDateString();
-    const isQuotaExceededToday = localStorage.getItem('appsScriptQuotaExceededDate') === todayStr;
-    const lastReferralDispatchedDate = localStorage.getItem('lastAutoReferralDispatchDate');
-    if (!isQuotaExceededToday && lastReferralDispatchedDate !== todayStr) {
-      setTimeout(() => {
-        sendReferralAlertsEmail(true).catch(() => {});
-        localStorage.setItem('lastAutoReferralDispatchDate', todayStr);
-      }, 7000); // Settle down loading before dispatching referral report
+    if (!currentUser) {
+      loadStateRef.current=null;
+      DbService.clearCache(); setMedicines([]);setDispenseRecords([]);setResidents([]);setUsers([]);setSessions([]);setStockLogs([]);setCompanies([]);setBehaviorLogs([]);setDoctors([]);
+      return;
     }
+    let active=true;
+    loadAllData({force:false});
+    protectedFetch('/api/ip').then(r=>r.json()).then(d=>{if(active)setClientIp(d.ip);}).catch(()=>{});
+    const timer=setInterval(()=>{if(active&&document.visibilityState==='visible')loadAllData({force:false});},60000);
+    return()=>{active=false;clearInterval(timer);};
+  },[currentUser?.uid]);
 
-    // Resolve client IP from full-stack backend Express API
-    fetch('/api/ip')
-      .then(res => res.json())
-      .then(data => {
-        if (data && data.ip) {
-          setClientIp(data.ip);
-          // Log user session on startup if already logged in
-          if (currentUser) {
-            logUserSessionOnStartup(data.ip, currentUser);
-          }
-        }
-      })
-      .catch(e => {
-        console.warn("Unable to fetch real IP via backend. Using fallback IP.");
-        if (currentUser) {
-          logUserSessionOnStartup('192.168.1.104', currentUser);
-        }
-      });
-  }, []);
+  useEffect(()=>{if(currentUser)void loadAllData({force:false});},[activeTab]);
 
-  // Log user session
+  useEffect(()=>{
+    const onError=(e:Event)=>{showToast((e as CustomEvent).detail,'error');};
+    const onEnd=()=>{DbService.clearCache();setCurrentUser(null);};
+    window.addEventListener('pharma-write-error',onError);window.addEventListener('pharma-session-ended',onEnd);
+    return()=>{window.removeEventListener('pharma-write-error',onError);window.removeEventListener('pharma-session-ended',onEnd);};
+  },[]);
+
   const logUserSessionOnStartup = async (ip: string, userToLog = currentUser) => {
     if (!userToLog) return;
     try {
@@ -2618,9 +2420,7 @@ export default function App() {
         deviceToken: "FCM-TOKEN-" + Math.random().toString(36).substr(2, 12).toUpperCase(),
         loginTime: new Date().toISOString()
       });
-      // reload sessions
-      const sess = await DbService.fetchSessions();
-      setSessions(sess);
+      // Login history is loaded only when an administrative screen needs it.
     } catch (e) {
       console.error("Session recording error: ", e);
     }
@@ -2633,51 +2433,7 @@ export default function App() {
   };
 
   // Switch role and update allowed screens automatically
-  const handleRoleChange = (role: string) => {
-    try {
-      const selectedRole = ROLES[role];
-      if (!selectedRole) return;
-      
-      // التأكد من أن المستخدم لا يمكنه تغيير دوره الوظيفي إطلاقاً إذا كان مسجلاً دخول بالفعل
-      if (currentUser) {
-        if (currentUser.role !== 'admin') {
-          // تعطيل التبديل تماماً للمستخدمين العاديين
-          showToast('عذراً، لا يمكنك تغيير الدور الوظيفي للمستخدمين العاديين. يجب تسجيل الخروج والدخول بحساب آخر.', 'error');
-          return;
-        } else {
-          // إضافة شرط يمنع حتى المدير من تبديل الدور أثناء الجلسة الحالية
-          showToast('عذراً، يمنع تغيير الدور للمدير أثناء الجلسة الحالية. يرجى تسجيل الخروج والدخول بمستخدم آخر.', 'error');
-          return;
-        }
-      }
-      
-      setCurrentUser((prev: any) => {
-        if (!prev) return null;
-        const updated = {
-          ...prev,
-          role: role,
-          isSimulated: true, // Mark as simulated
-          name: role === 'developer' ? "م. تامر (المبرمج)" : role === 'admin' ? "مدير النظام" : role === 'pharmacist' ? "صيدلي. كريم القحطاني" : "فني. ماجد الرويلي",
-          email: role === 'developer' ? "tmrbe2006@gmail.com" : role === 'admin' ? "admin@carecenter.org" : role === 'pharmacist' ? "kareem.q@carecenter.org" : "majed.r@carecenter.org",
-          phone: role === 'developer' ? "+966500001122" : role === 'admin' ? "+966501234567" : role === 'pharmacist' ? "+966507654321" : "+966509998887"
-        };
-        // Persist role change if user has opted for remember me
-        if (localStorage.getItem('care_pharmacy_user')) {
-          localStorage.setItem('care_pharmacy_user', JSON.stringify(updated));
-        }
-        return updated;
-      });
-
-      // Adjust active tab if no longer permitted
-      if (!selectedRole.allowedScreens.includes(activeTab)) {
-        setActiveTab(selectedRole.allowedScreens[0]);
-      }
-
-      showToast(`تم تبديل الصلاحية الوظيفية إلى: ${selectedRole.name}`, 'success');
-    } catch (e) {
-      showToast('فشل تغيير الصلاحية والمستند الأساسي', 'error');
-    }
-  };
+  const handleRoleChange = (_role: string) => showToast('سجل الدخول بحساب آخر لتغيير الدور الوظيفي.', 'error');
 
   // Complete User Login Helper
   const completeUserLogin = (userToLogin: any) => {
@@ -2690,12 +2446,6 @@ export default function App() {
     };
 
     setCurrentUser(sessionUser);
-    if (rememberMe) {
-      localStorage.setItem('care_pharmacy_user', JSON.stringify(sessionUser));
-    } else {
-      localStorage.removeItem('care_pharmacy_user');
-    }
-
     // Broadcast login to inform and sync other browser tabs in real-time
     try {
       const bus = new BroadcastChannel('care_pharmacy_session_bus');
@@ -2713,180 +2463,22 @@ export default function App() {
 
   // Secure Login Submission with Single Active Session Concurrency Check (منع تكرار دخول الحساب)
   const handleLoginSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!loginEmail || !loginPassword) {
-      showToast('برجاء إدخال البريد الإلكتروني وكلمة المرور', 'error');
-      return;
-    }
-
-    setIsLoggingIn(true);
+    e.preventDefault();setIsLoggingIn(true);
     try {
-      const cleanEmail = loginEmail.trim().toLowerCase();
-      
-      // 1. Fetch current users, refreshing from DbService if user is missing or password mismatch to guarantee checking the live database
-      let currentUsersList = [...users];
-      let userInDb = currentUsersList.find(u => u.email?.trim().toLowerCase() === cleanEmail);
-
-      const isProgrammerInitialMatch = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || loginPassword === 'dev' || userInDb?.password === loginPassword);
-
-      if (!userInDb || (!isProgrammerInitialMatch && userInDb.password !== loginPassword)) {
-        try {
-          const freshUsers = await DbService.fetchUsers();
-          if (freshUsers && freshUsers.length > 0) {
-            setUsers(freshUsers);
-            currentUsersList = freshUsers;
-            userInDb = freshUsers.find((u: any) => u.email?.trim().toLowerCase() === cleanEmail);
-          }
-        } catch (err) {
-          console.warn("Could not refresh users from DB:", err);
-        }
-      }
-
-      // Default fallback for developer if not found in db
-      if (!userInDb && cleanEmail === 'tmrbe2006@gmail.com') {
-        userInDb = {
-          uid: "user-tmrbe",
-          name: "م. تامر (المبرمج)",
-          email: "tmrbe2006@gmail.com",
-          role: "developer",
-          phone: "+966500001122",
-          password: "tmrbe2006"
-        };
-      }
-
-      if (!userInDb) {
-        showToast('عذراً، البريد الإلكتروني غير مسجل في قاعدة البيانات!', 'error');
-        return;
-      }
-
-      // STRICT PASSWORD VERIFICATION:
-      // For developer tmrbe2006@gmail.com, verify against database password or 'tmrbe2006' or 'dev'
-      const isProgrammerVerified = cleanEmail === 'tmrbe2006@gmail.com' && (loginPassword === 'tmrbe2006' || loginPassword === 'dev' || userInDb.password === loginPassword);
-      const isPasswordCorrect = isProgrammerVerified || userInDb.password === loginPassword;
-
-      if (!isPasswordCorrect) {
-        showToast('عذراً، كلمة المرور غير صحيحة! يرجى إدخال كلمة المرور الصحيحة المحفوظة في قاعدة البيانات.', 'error');
-        return;
-      }
-
-      // Ensure database password is synchronized with tmrbe2006 if logging in with tmrbe2006
-      if (cleanEmail === 'tmrbe2006@gmail.com' && userInDb.password !== loginPassword) {
-        userInDb.password = loginPassword;
-        DbService.updateUser({ ...userInDb, password: loginPassword }).catch(() => {});
-        updateUsersList(users.map(u => u.email?.toLowerCase() === 'tmrbe2006@gmail.com' ? { ...u, password: loginPassword } : u));
-      }
-
-      const matchedUser = { ...userInDb };
-      if (matchedUser.email?.toLowerCase() === 'tmrbe2006@gmail.com') {
-        matchedUser.role = 'developer';
-      }
-
-      // Authoritative instant takeover rights for Developer and Admin:
-      // Accounts for developer (tmrbe2006@gmail.com) and admin automatically terminate lingering/stale sessions
-      const isPrivileged = cleanEmail === 'tmrbe2006@gmail.com' || matchedUser.role === 'developer' || matchedUser.role === 'admin';
-
-      if (isPrivileged) {
-        // FAST-TRACK LOGIN: Immediate zero-wait authentication for developer & admin
-        DbService.claimActiveSession({
-          sessionId: activeSessionId,
-          userId: matchedUser.uid,
-          userName: matchedUser.name,
-          userEmail: matchedUser.email,
-          userRole: matchedUser.role,
-          ipAddress: clientIp || '127.0.0.1',
-          userAgent: navigator.userAgent,
-          loginTime: new Date().toISOString(),
-          lastHeartbeat: new Date().toISOString()
-        }, true).catch(err => console.warn("Background claim error:", err));
-
-        try {
-          const bus = new BroadcastChannel('care_pharmacy_session_bus');
-          bus.postMessage({
-            type: 'FORCE_DISPLACE',
-            email: cleanEmail,
-            sessionId: activeSessionId
-          });
-          bus.close();
-        } catch (e) {}
-
-        completeUserLogin(matchedUser);
-        return;
-      }
-
-      // --- CONCURRENCY ENFORCEMENT: Check if the user is already logged in on another session/device ---
-      try {
-        const claimPromise = DbService.claimActiveSession({
-          sessionId: activeSessionId,
-          userId: matchedUser.uid,
-          userName: matchedUser.name,
-          userEmail: matchedUser.email,
-          userRole: matchedUser.role,
-          ipAddress: clientIp || '127.0.0.1',
-          userAgent: navigator.userAgent,
-          loginTime: new Date().toISOString(),
-          lastHeartbeat: new Date().toISOString()
-        }, false);
-
-        const claimResult = await Promise.race([
-          claimPromise,
-          new Promise<any>(resolve => setTimeout(() => resolve({ success: true }), 2000))
-        ]);
-
-        if (claimResult && claimResult.conflict && claimResult.activeSession) {
-          setSessionConflictModal({
-            show: true,
-            activeSession: claimResult.activeSession,
-            pendingUser: matchedUser
-          });
-          showToast('⚠️ تنبيه أمني: هذا الحساب مسجل دخول حالياً بالفعل على جلسة أخرى نشطة!', 'error');
-          return;
-        }
-      } catch (concurrencyErr) {
-        console.warn("Session concurrency check error, proceeding safely:", concurrencyErr);
-      }
-
-      // Proceed with login
-      completeUserLogin(matchedUser);
-    } finally {
-      setIsLoggingIn(false);
-    }
+      const result=await DbService.login(loginEmail,loginPassword,activeSessionId,rememberMe);
+      completeUserLogin(result.user);setLoginPassword('');
+    }catch(err:any){
+      if(err.code==='SESSION_CONFLICT') setSessionConflictModal({show:true,activeSession:null,pendingUser:{email:loginEmail}});
+      else showToast(err.message,'error');
+    }finally{setIsLoggingIn(false);}
   };
 
   // Force Takeover Login Handler (ends previous session and authenticates on this device)
   const handleForceTakeoverLogin = async () => {
-    if (!sessionConflictModal.pendingUser) return;
-    const targetUser = sessionConflictModal.pendingUser;
-
     try {
-      await DbService.claimActiveSession({
-        sessionId: activeSessionId,
-        userId: targetUser.uid,
-        userName: targetUser.name,
-        userEmail: targetUser.email,
-        userRole: targetUser.role,
-        ipAddress: clientIp || '127.0.0.1',
-        userAgent: navigator.userAgent,
-        loginTime: new Date().toISOString(),
-        lastHeartbeat: new Date().toISOString()
-      }, true); // force = true
-
-      // Broadcast force displacement to kick out previous active tab/device
-      try {
-        const bus = new BroadcastChannel('care_pharmacy_session_bus');
-        bus.postMessage({
-          type: 'FORCE_DISPLACE',
-          email: targetUser.email.toLowerCase(),
-          newSessionId: activeSessionId
-        });
-        bus.close();
-      } catch (e) {}
-
-      setSessionConflictModal({ show: false, activeSession: null, pendingUser: null });
-      completeUserLogin(targetUser);
-      showToast('تم إنهاء الجلسة السابقة بنجاح وتسجيل الدخول إلى هذا الجهاز! 🛡️', 'success');
-    } catch (err: any) {
-      showToast(`فشل إنهاء الجلسة السابقة: ${err.message}`, 'error');
-    }
+      const result=await DbService.login(loginEmail,loginPassword,activeSessionId,rememberMe,true);
+      setSessionConflictModal({show:false,activeSession:null,pendingUser:null});completeUserLogin(result.user);setLoginPassword('');
+    }catch(err:any){showToast(err.message,'error');}
   };
 
   // Logout handler with active session cleanup
@@ -2908,101 +2500,11 @@ export default function App() {
     showToast('تم تسجيل الخروج بنجاح. في أمان الله ورعايته!', 'success');
   };
 
-  // Watch active session heartbeat and handle remote displacement across tabs/devices
-  useEffect(() => {
-    if (!currentUser?.email) return;
-
-    const userEmail = currentUser.email.toLowerCase();
-    const isPrivileged = userEmail === 'tmrbe2006@gmail.com' || currentUser.role === 'developer' || currentUser.role === 'admin';
-
-    // 1. Instant check on mount / login to verify this session isn't conflicted with another active browser
-    const verifyInitialSession = async () => {
-      try {
-        const res = await DbService.claimActiveSession({
-          sessionId: activeSessionId,
-          userId: currentUser.uid || '',
-          userName: currentUser.name || currentUser.email,
-          userEmail: currentUser.email,
-          userRole: currentUser.role || '',
-          ipAddress: clientIp || '127.0.0.1',
-          userAgent: navigator.userAgent,
-          loginTime: new Date().toISOString(),
-          lastHeartbeat: new Date().toISOString()
-        }, isPrivileged);
-
-        if (res.conflict && !isPrivileged) {
-          // Another browser/device is already logged in! Kick out this stale session
-          setCurrentUser(null);
-          localStorage.removeItem('care_pharmacy_user');
-          setDisplacedModal({
-            show: true,
-            message: 'تم تسجيل الخروج لأن هذا الحساب نشط حالياً على متصفح أو جهاز آخر. يُسمح بجلسة نشطة واحدة فقط لكل حساب لمنع التكرار.'
-          });
-        }
-      } catch (e) {
-        console.warn("Initial session verification error:", e);
-      }
-    };
-    verifyInitialSession();
-
-    // 2. Real-time Firestore snapshot listener for instant displacement with grace period
-    let unsubFirestore: (() => void) | null = null;
-    const graceTimer = setTimeout(() => {
-      unsubFirestore = DbService.subscribeToActiveSession(userEmail, activeSessionId, (msg: string) => {
-        setCurrentUser(null);
-        localStorage.removeItem('care_pharmacy_user');
-        setDisplacedModal({
-          show: true,
-          message: msg || 'تم تسجيل الدخول إلى هذا الحساب من متصفح أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع التكرار.'
-        });
-      });
-    }, 600);
-
-    // 3. Periodic heartbeat every 10s to keep session alive and check server & Firestore state
-    const interval = setInterval(async () => {
-      try {
-        const res = await DbService.heartbeatActiveSession(userEmail, activeSessionId);
-        if (res.displaced) {
-          setCurrentUser(null);
-          localStorage.removeItem('care_pharmacy_user');
-          setDisplacedModal({
-            show: true,
-            message: res.message || 'تم تسجيل الدخول إلى هذا الحساب من جلسة أو جهاز آخر، وتم إنهاء هذه الجلسة تلقائياً لمنع التكرار.'
-          });
-        }
-      } catch (e) {
-        console.warn("Session heartbeat check:", e);
-      }
-    }, 10000);
-
-    // 4. BroadcastChannel for instant real-time multi-tab session protection on same browser
-    let bus: BroadcastChannel | null = null;
-    try {
-      bus = new BroadcastChannel('care_pharmacy_session_bus');
-      bus.onmessage = (event) => {
-        const data = event.data;
-        if (!data || !data.email) return;
-        if (data.email.toLowerCase() === userEmail) {
-          if ((data.type === 'FORCE_DISPLACE' || data.type === 'LOGIN_CLAIM') && data.sessionId !== activeSessionId) {
-            // Displaced in real-time by another tab/window!
-            setCurrentUser(null);
-            localStorage.removeItem('care_pharmacy_user');
-            setDisplacedModal({
-              show: true,
-              message: 'تم تسجيل الدخول إلى حسابك من نافذة أو جهاز آخر. تم إنهاء هذه الجلسة تلقائياً لحماية خصوصية وسرية السجلات الدوائية.'
-            });
-          }
-        }
-      };
-    } catch (e) {}
-
-    return () => {
-      clearTimeout(graceTimer);
-      clearInterval(interval);
-      if (bus) bus.close();
-      if (typeof unsubFirestore === 'function') unsubFirestore();
-    };
-  }, [currentUser?.email, activeSessionId]);
+  useEffect(()=>{
+    if(!currentUser)return;
+    let pending=false;const timer=setInterval(()=>{if(pending||document.visibilityState!=='visible')return;pending=true;DbService.heartbeatActiveSession(currentUser.email,activeSessionId).catch(()=>{}).finally(()=>{pending=false;});},30000);
+    return()=>clearInterval(timer);
+  },[currentUser?.uid,activeSessionId]);
 
   // Change Password Handler (إمكانية تغيير المستخدم لكلمة المرور الخاصة به)
   const handleChangePasswordSubmit = async (e: React.FormEvent) => {
@@ -3028,55 +2530,8 @@ export default function App() {
       return;
     }
 
-    // 2. Verify current password strictly against database record
-    let userInDb = users.find(u => u.uid === currentUser.uid || u.email?.toLowerCase() === currentUser.email?.toLowerCase());
-    if (!userInDb || userInDb.password !== currentPassword) {
-      try {
-        const freshUsers = await DbService.fetchUsers();
-        if (freshUsers && freshUsers.length > 0) {
-          setUsers(freshUsers);
-          userInDb = freshUsers.find((u: any) => u.uid === currentUser.uid || u.email?.toLowerCase() === currentUser.email?.toLowerCase());
-        }
-      } catch (err) {}
-    }
-
-    const isProgrammerOldPass = currentUser.email?.toLowerCase() === 'tmrbe2006@gmail.com' && (currentPassword === 'tmrbe2006' || userInDb?.password === currentPassword);
-    const isPassValid = isProgrammerOldPass || (userInDb && userInDb.password === currentPassword);
-
-    if (!isPassValid) {
-      setPasswordForm(prev => ({ ...prev, error: 'كلمة المرور الحالية غير صحيحة. يرجى التأكد وإعادة المحاولة', isSubmitting: false }));
-      return;
-    }
-
     try {
-      const updatedUser = {
-        ...(userInDb || currentUser),
-        password: newPassword
-      };
-
-      await DbService.updateUser(updatedUser);
-
-      const updatedUsersList = users.map(u => 
-        (u.uid === updatedUser.uid || u.email.toLowerCase() === updatedUser.email.toLowerCase()) 
-          ? updatedUser 
-          : u
-      );
-      updateUsersList(updatedUsersList);
-
-      // Audit log
-      await DbService.addStockLog({
-        medicineId: currentUser.uid || 'usr-pwd',
-        medicineName: `حساب: ${currentUser.name}`,
-        actionType: 'تغيير كلمة المرور',
-        quantityChanged: 0,
-        previousQuantity: 0,
-        newQuantity: 0,
-        performedByName: currentUser.name,
-        performedByEmail: currentUser.email,
-        performedById: currentUser.uid || '',
-        notes: 'تحديث كلمة مرور المستخدم عبر الشاشة الشخصية بنجاح'
-      });
-
+      await DbService.changePassword(currentPassword,newPassword);
       setPasswordForm({
         currentPassword: '',
         newPassword: '',
@@ -3100,7 +2555,7 @@ export default function App() {
   };
 
   // Add Behavior Log Handler
-  const handleAddBehaviorLog = (e: React.FormEvent) => {
+  const handleAddBehaviorLog = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       if (!behaviorForm.residentId) {
@@ -3138,7 +2593,7 @@ export default function App() {
           }
           return log;
         });
-        updateBehaviorLogs(updatedLogs);
+        await updateBehaviorLogs(updatedLogs);
         setShowAddBehaviorModal(false);
         setSelectedBehaviorLogId(null);
         showToast(text(`تم تعديل الملاحظة السلوكية بنجاح للمستفيد: ${res.name}`, `Behavioral observation updated successfully for: ${res.name}`), 'success');
@@ -3159,7 +2614,7 @@ export default function App() {
         };
 
         const updated = [newLog, ...behaviorLogs];
-        updateBehaviorLogs(updated);
+        await updateBehaviorLogs(updated);
         setShowAddBehaviorModal(false);
         showToast(text(`تم تسجيل الملاحظة السلوكية بنجاح للمستفيد: ${res.name}`, `Behavioral observation logged successfully for: ${res.name}`), 'success');
       }
@@ -3288,11 +2743,12 @@ export default function App() {
 
   // Set values for Editing Medicine
   const openEditModal = (med: Medicine) => {
+    editingMedicineVersion.current=(med as any)._version;
     setSelectedMedId(med.id);
     const commName = med.commercialNameEn || med.commercialName || med.commercialNameAr || '';
     setMedForm({
       commercialName: commName,
-      commercialNameAr: '',
+      commercialNameAr: med.commercialNameAr || '',
       commercialNameEn: commName,
       scientificName: med.scientificName,
       quantity: med.quantity,
@@ -3331,9 +2787,9 @@ export default function App() {
       };
 
       const updated = await DbService.updateMedicine(selectedMedId, {
-        ...medForm,
+        ...medForm,_version:editingMedicineVersion.current,
         commercialName: commEn,
-        commercialNameAr: '',
+        commercialNameAr: medForm.commercialNameAr,
         commercialNameEn: commEn,
         entryDate: entryDt,
         quantity: Number(medForm.quantity),
@@ -3346,7 +2802,7 @@ export default function App() {
       // Reset
       setMedForm({
         commercialName: '',
-        commercialNameAr: '',
+        commercialNameAr: medForm.commercialNameAr,
         commercialNameEn: '',
         scientificName: '',
         quantity: 100,
@@ -3440,7 +2896,7 @@ export default function App() {
       return;
     }
     if (doc) {
-      setSelectedDoctorId(doc.id);
+      setSelectedDoctorId(doc.id);editingDoctorVersion.current=(doc as any)._version;
       setDoctorForm({
         nameAr: doc.nameAr || '',
         nameEn: doc.nameEn || '',
@@ -3479,6 +2935,7 @@ export default function App() {
     try {
       if (selectedDoctorId) {
         const updated = await DbService.updateDoctor(selectedDoctorId, {
+          _version:editingDoctorVersion.current,
           nameAr: doctorForm.nameAr.trim(),
           nameEn: doctorForm.nameEn.trim(),
           specialty: doctorForm.specialty.trim(),
@@ -3578,18 +3035,7 @@ export default function App() {
         doctorSpecialty: selectedDoctor?.specialty || ''
       });
 
-      // 1. Optimistically deduct quantity from medicines state immediately
-      const dispensedQty = Number(dispenseForm.actualQuantityDispensed);
-      setMedicines(prev => prev.map(m => {
-        if (m.id === med.id) {
-          const newQ = Math.max(0, Math.round((m.quantity - dispensedQty) * 10000) / 10000);
-          return { ...m, quantity: newQ, updatedAt: new Date().toISOString() };
-        }
-        return m;
-      }));
-
-      // 2. Update dispenseRecords state immediately
-      setDispenseRecords(prev => [record, ...prev]);
+      setMedicines(getLocalMedicines());setDispenseRecords(getLocalDispenses());
 
       // 3. Close modal and show success toast immediately
       setShowDispenseModal(false);
@@ -3625,7 +3071,7 @@ export default function App() {
 
     try {
       // Call standard server-side AI evaluation API
-      const response = await fetch('/api/ai/assess-patient', {
+      const response = await protectedFetch('/api/ai/assess-patient', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3854,7 +3300,7 @@ export default function App() {
     let fetchFailed = false;
 
     try {
-      response = await fetch('/api/notifications/dispatch-test', {
+      response = await protectedFetch('/api/notifications/dispatch-test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -3982,7 +3428,7 @@ export default function App() {
           const mode = whatsAppMode || 'ultramsg';
           if (mode === 'ultramsg' && ultraMsgInstance && ultraMsgToken) {
             try {
-              const waResponse = await fetch(`https://api.ultramsg.com/${ultraMsgInstance}/messages/chat`, {
+              const waResponse = await protectedFetch(`https://api.ultramsg.com/${ultraMsgInstance}/messages/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({
@@ -4003,7 +3449,7 @@ export default function App() {
           } else if (mode === 'callmebot' && callMeBotApiKey) {
             try {
               const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(whatsAppNumber)}&text=${encodeURIComponent(alertMessage)}&apikey=${encodeURIComponent(callMeBotApiKey)}`;
-              await fetch(url, { method: 'GET', mode: 'no-cors' }); 
+              await protectedFetch(url, { method: 'GET', mode: 'no-cors' });
               logs.push(`[WhatsApp CallMeBot] تم إرسال التنبيه التلقائي المجاني بنجاح لـ ${whatsAppNumber} من المتصفح.`);
             } catch (err: any) {
               logs.push(`[WhatsApp CallMeBot Error] فشل الاتصال ببوابة CallMeBot: ${err.message}`);
@@ -4046,7 +3492,7 @@ export default function App() {
                 }
               }
 
-              const waResponse = await fetch(url, {
+              const waResponse = await protectedFetch(url, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(requestBody)
@@ -4083,7 +3529,7 @@ export default function App() {
               const currentUrl = urls[i];
               try {
                 const cleanUrl = currentUrl.startsWith('http') ? currentUrl : `https://script.google.com/macros/s/${currentUrl}`;
-                const responseMail = await fetch(cleanUrl, {
+                const responseMail = await protectedFetch(cleanUrl, {
                   method: 'POST',
                   headers: { 'Content-Type': 'text/plain;charset=utf-8' }, 
                   body: JSON.stringify({
@@ -4199,7 +3645,7 @@ export default function App() {
       let arPdfUrl = `${window.location.origin}/api/reports/pdf/arabic`;
       let enPdfUrl = `${window.location.origin}/api/reports/pdf/english`;
       try {
-        await fetch('/api/reports/pdf/upload', {
+        await protectedFetch('/api/reports/pdf/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -4823,7 +4269,7 @@ export default function App() {
   // Helper to check if a dose has already been dispensed today (once-a-day protection)
   const isDoseDispensedToday = (dose: any) => {
     if (!dose || !dose.checkedToday) return false;
-    const todayYmd = new Date().toISOString().split('T')[0];
+    const todayYmd = new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Riyadh',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
     if (dose.lastDispensedDate === todayYmd) return true;
     if (dose.checkedAt && dose.checkedAt.startsWith(todayYmd)) return true;
     return false;
@@ -4879,12 +4325,13 @@ export default function App() {
       const recipientName = resident.nameAr || resident.name;
       const totalCost = (med.price || 0) * qtyToDispense;
       const currentUserActor = currentUser?.name || "الصيدلي المناوب";
-      const todayYmd = new Date().toISOString().split('T')[0];
+      const todayYmd = new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Riyadh',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
       const nowIso = new Date().toISOString();
 
       // 5. Create official dispense record (this automatically deducts from inventory & logs stock audit in DbService)
       const record = await DbService.addDispenseRecord({
         medicineId: med.id,
+        doseId,
         medicineName: med.commercialName,
         medicineNameEn: med.commercialNameEn || med.scientificName || '',
         residentId: resident.id,
@@ -4898,52 +4345,8 @@ export default function App() {
         dispensedById: currentUser?.uid || "pharmacist-1"
       });
 
-      // 6. Update local dispenseRecords state immediately
-      setDispenseRecords(prev => [record, ...prev]);
-
-      // 7. Optimistically deduct quantity from medicines state immediately
-      setMedicines(prev => prev.map(m => {
-        if (m.id === med.id) {
-          const newQ = Math.max(0, Math.round((m.quantity - qtyToDispense) * 10000) / 10000);
-          return { ...m, quantity: newQ, updatedAt: new Date().toISOString() };
-        }
-        return m;
-      }));
-
-      // 8. Update resident schedule and lock for today
-      let targetResidentToSync: any = null;
-      const updatedResidents = residents.map(r => {
-        if (r.id === residentId) {
-          const sched = (r.dosageSchedule || []).map((item: any) => {
-            if (item.id === doseId) {
-              return {
-                ...item,
-                checkedToday: true,
-                lastDispensedDate: todayYmd,
-                checkedBy: currentUserActor,
-                checkedAt: nowIso,
-                dispenseRecordId: record.id,
-                dispensedQty: qtyToDispense
-              };
-            }
-            return item;
-          });
-          const updatedResident = { ...r, dosageSchedule: sched };
-          targetResidentToSync = updatedResident;
-          setActiveDossierResident(updatedResident);
-          return updatedResident;
-        }
-        return r;
-      });
-
-      // Update residents state and local storage immediately
-      setResidents(updatedResidents);
-      saveLocalResidents(updatedResidents);
-
-      // Non-blocking sync for only this single resident to Firestore (prevents 146 bulk writes)
-      if (targetResidentToSync) {
-        DbService.syncSingleResident(targetResidentToSync).catch(() => {});
-      }
+      setDispenseRecords(getLocalDispenses());setMedicines(getLocalMedicines());setResidents(getLocalResidents());
+      const confirmed=getLocalResidents().find(r=>r.id===residentId);if(confirmed)setActiveDossierResident(confirmed);
 
       showToast(
         text(
@@ -4966,7 +4369,7 @@ export default function App() {
     dispenseDoseAutomatically(residentId, doseId);
   };
 
-  const addDoseToResidentSchedule = (residentId: string) => {
+  const addDoseToResidentSchedule = async (residentId: string) => {
     if (!newDoseForm.medicineId || !newDoseForm.dosage) {
       showToast(lang === 'ar' ? "يرجى اختيار الدواء وتحديد الجرعة المطلوبة." : "Please select medication and specify dosage.", "error");
       return;
@@ -4995,20 +4398,20 @@ export default function App() {
       }
       return r;
     });
-    updateResidentsList(updatedResidents);
+    if(!await updateResidentsList(updatedResidents))return;
     setNewDoseForm({ timeSlot: '08:00', medicineId: '', dosage: '', quantity: 1 });
     setDoseMedSearch('');
     showToast(lang === 'ar' ? `تمت جدولة الجرعة (${parsedQty} ${targetMed.unit || 'حبة'}) بنجاح في القائمة 💊` : `Medication dose scheduled successfully (${parsedQty} unit) 💊`, "success");
   };
 
-  const handleUpdateDossierReferralDate = (residentId: string, newReferralDate: string) => {
+  const handleUpdateDossierReferralDate = async (residentId: string, newReferralDate: string) => {
     const updatedResidents = residents.map(r => {
       if (r.id === residentId) {
         return { ...r, referralDate: newReferralDate };
       }
       return r;
     });
-    updateResidentsList(updatedResidents);
+    if(!await updateResidentsList(updatedResidents))return;
     const target = updatedResidents.find(r => r.id === residentId);
     if (target) {
       setActiveDossierResident(target);
@@ -5016,7 +4419,7 @@ export default function App() {
     showToast(lang === 'ar' ? "تم تحديث تاريخ الإحالة (Refill Date) بنجاح 📅" : "Refill date updated successfully 📅", "success");
   };
 
-  const removeDoseFromResidentSchedule = (residentId: string, doseId: string) => {
+  const removeDoseFromResidentSchedule = async (residentId: string, doseId: string) => {
     const updatedResidents = residents.map(r => {
       if (r.id === residentId) {
         const sched = r.dosageSchedule || [];
@@ -5027,7 +4430,7 @@ export default function App() {
       }
       return r;
     });
-    updateResidentsList(updatedResidents);
+    if(!await updateResidentsList(updatedResidents))return;
     showToast("تم إزالة الجرعة المجدولة.", "success");
   };
 
@@ -5053,7 +4456,7 @@ export default function App() {
     });
 
     try {
-      const response = await fetch('/api/ai/check-interactions', {
+      const response = await protectedFetch('/api/ai/check-interactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5236,6 +4639,10 @@ export default function App() {
     }
   }, [activeTab, currentUser]);
 
+  const filteredDispenses=useMemo(()=>getFilteredDispenseRecords(),[dispenseRecords,residents,medicines,lang,dispenseSearchQuery,dispenseStartDate,dispenseEndDate,dispenseTimeQuery,dispenseSortField,dispenseSortDirection]);
+
+  if (authChecking) return <div dir="rtl" className="min-h-screen grid place-items-center bg-slate-950 text-white">جارٍ التحقق من جلسة الدخول…</div>;
+
   if (!currentUser) {
     return (
       <div className={`min-h-screen w-full flex flex-col items-center justify-center py-12 px-4 sm:px-6 lg:px-8 transition-colors duration-200 ${darkMode ? 'bg-slate-950' : 'bg-slate-50'}`} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
@@ -5385,8 +4792,8 @@ export default function App() {
               <Shield className="w-3 h-3 text-teal-500" />
               <span>
                 {lang === 'ar' 
-                  ? 'نظام مشفر وممتثل لمعايير الهيئة العامة للغذاء والدواء ووزارة الصحة السعودية' 
-                  : 'Encrypted system compliant with SFDA and Saudi Ministry of Health guidelines'}
+                  ? 'نظام إدارة الصيدلية — دخول مخصص للموظفين المخولين'
+                  : 'Pharmacy management — authorized staff access'}
               </span>
             </p>
           </div>
@@ -5402,86 +4809,13 @@ export default function App() {
           </div>
         )}
         {/* Session Conflict Modal: Active Session Exists on System (منع تسجيل الدخول المتزامن) */}
-        {sessionConflictModal.show && sessionConflictModal.activeSession && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in" dir={lang === 'ar' ? 'rtl' : 'ltr'}>
-            <div className={`w-full max-w-lg rounded-3xl border p-6 sm:p-7 shadow-2xl space-y-5 ${darkMode ? 'bg-slate-900 border-slate-800 text-slate-100 shadow-slate-950/80' : 'bg-white border-slate-200 text-slate-900 shadow-2xl'}`}>
-              
-              {/* Header Icon & Title */}
-              <div className="text-center space-y-2">
-                <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto shadow-lg shadow-amber-950/30">
-                  <ShieldAlert className="w-7 h-7" />
-                </div>
-                <h3 className="text-lg sm:text-xl font-black text-amber-400">
-                  {lang === 'ar' ? 'تنبيه أمني: الحساب مسجل دخول حالياً بالفعل! ⚠️' : 'Security Alert: Account Already Logged In! ⚠️'}
-                </h3>
-                <p className="text-xs text-slate-400 leading-relaxed font-semibold">
-                  {lang === 'ar' 
-                    ? 'تم تأكيد وجود جلسة نشطة ومفتوحة لهذا المستخدم على النظام. يمنع النظام تسجيل الدخول المتزامن والمتعدد لنفس الحساب لحماية سرية البيانات ومنع تعارض الصرف الدوائي.'
-                    : 'An active session for this user was confirmed on the system. The system enforces a single active session per user to safeguard medical data integrity.'}
-                </p>
-              </div>
-
-              {/* Active Session Details Card */}
-              <div className={`p-4 rounded-2xl border text-xs space-y-2.5 ${darkMode ? 'bg-slate-950/70 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-                <div className="font-bold text-slate-300 pb-1 border-b border-slate-800/60 flex items-center justify-between">
-                  <span>{lang === 'ar' ? '📌 تفاصيل الجلسة النشطة الحالية:' : '📌 Current Active Session Details:'}</span>
-                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    {lang === 'ar' ? 'نشطة الآن' : 'Active Now'}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div>
-                    <span className="text-slate-500 block">{lang === 'ar' ? 'اسم المستخدم:' : 'User Name:'}</span>
-                    <span className="font-bold text-slate-200">{sessionConflictModal.activeSession.userName}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block">{lang === 'ar' ? 'البريد الإلكتروني:' : 'Email Address:'}</span>
-                    <span className="font-mono text-slate-200">{sessionConflictModal.activeSession.userEmail}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block">{lang === 'ar' ? 'عنوان الـ IP للجهاز:' : 'IP Address:'}</span>
-                    <span className="font-mono text-teal-400 font-bold">{sessionConflictModal.activeSession.ipAddress || '127.0.0.1'}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 block">{lang === 'ar' ? 'وقت تسجيل الدخول:' : 'Login Time:'}</span>
-                    <span className="font-mono text-slate-300">
-                      {new Date(sessionConflictModal.activeSession.loginTime).toLocaleTimeString(lang === 'ar' ? 'ar-SA' : 'en-US')}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="pt-1 text-[11px] text-slate-400">
-                  <span className="text-slate-500 block">{lang === 'ar' ? 'بيئة التصفح / الجهاز:' : 'Browser / Device:'}</span>
-                  <span className="truncate block font-mono text-[10px] text-slate-400 bg-slate-900/50 p-1.5 rounded border border-slate-800">
-                    {sessionConflictModal.activeSession.userAgent}
-                  </span>
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="space-y-2 pt-1">
-                <button
-                  type="button"
-                  onClick={handleForceTakeoverLogin}
-                  className="w-full py-3 px-4 bg-gradient-to-r from-amber-600 to-rose-600 hover:from-amber-500 hover:to-rose-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-950/40 transition active:scale-95 cursor-pointer"
-                >
-                  <Shield className="w-4 h-4 shrink-0" />
-                  <span>{lang === 'ar' ? 'إنهاء الجلسة السابقة وتسجيل الدخول هنا ⚡' : 'Force Disconnect Previous Session & Login ⚡'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setSessionConflictModal({ show: false, activeSession: null, pendingUser: null })}
-                  className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition active:scale-95 cursor-pointer ${
-                    darkMode ? 'border-slate-800 bg-slate-800/50 hover:bg-slate-800 text-slate-300' : 'border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {lang === 'ar' ? 'إلغاء والرجوع' : 'Cancel & Dismiss'}
-                </button>
-              </div>
-
+        {sessionConflictModal.show && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 p-4" dir={lang==='ar'?'rtl':'ltr'}>
+            <div role="dialog" aria-modal="true" aria-label="جلسة نشطة" className="max-w-md rounded-2xl bg-slate-900 text-white p-6 space-y-4">
+              <h2 className="font-bold">{text('الحساب نشط على جهاز آخر','Account active on another device')}</h2>
+              <p>{text('يمكنك إنهاء الجلسة السابقة والدخول على هذا الجهاز بعد التحقق من كلمة المرور.','End the previous session and sign in here using your password.')}</p>
+              <button type="button" onClick={handleForceTakeoverLogin} className="rounded-xl px-4 py-2 bg-teal-600">{text('إنهاء الجلسة السابقة والدخول','Sign in here')}</button>
+              <button type="button" onClick={()=>setSessionConflictModal({show:false,activeSession:null,pendingUser:null})} className="rounded-xl px-4 py-2 bg-slate-700">{text('إلغاء','Cancel')}</button>
             </div>
           </div>
         )}
@@ -5656,8 +4990,8 @@ export default function App() {
             title={lang === 'ar' ? 'مزامنة وتحديث قاعدة البيانات سحابياً فوراً (متاح لجميع المستخدمين)' : 'Synchronize Database with Cloud Now (For all users)'}
           >
             <RefreshCw className={`w-3.5 h-3.5 text-teal-400 shrink-0 ${isSyncingDb ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline font-bold">{lang === 'ar' ? 'مزامنة قاعدة البيانات 🔄' : 'Sync DB 🔄'}</span>
-            <span className="sm:hidden font-bold">{lang === 'ar' ? 'مزامنة 🔄' : 'Sync 🔄'}</span>
+            <span className="hidden sm:inline font-bold">{lang === 'ar' ? 'تحديث البيانات 🔄' : 'Refresh 🔄'}</span>
+            <span className="sm:hidden font-bold">{lang === 'ar' ? 'تحديث 🔄' : 'Refresh 🔄'}</span>
           </button>
 
           {/* ⚡ Power BI Smart Action Group Dropdown: Groups AI Tools, User Utilities & Quick Actions without horizontal overflow */}
@@ -5702,8 +5036,8 @@ export default function App() {
                       {lang === 'ar' ? ROLES[currentUser?.role || 'admin']?.name : (currentUser?.role || 'admin').toUpperCase()}
                     </span>
                     <div className="flex items-center gap-1 text-[9px] font-mono text-slate-400">
-                      <span className={`w-1.5 h-1.5 rounded-full ${isFirebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-                      <span>{firebaseConfig.projectId}</span>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isDatabaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                      <span>{databaseInfo.projectId}</span>
                     </div>
                   </div>
                 </div>
@@ -5785,7 +5119,7 @@ export default function App() {
                     {lang === 'ar' ? 'إجراءات سريعة' : 'Quick Actions'}
                   </div>
 
-                  {/* Universal Database Cloud Sync Button (متاح لجميع المستخدمين بلا استثناء) */}
+                  {/* Universal Database Refresh data Button (متاح لجميع المستخدمين بلا استثناء) */}
                   <button
                     type="button"
                     onClick={() => {
@@ -5799,8 +5133,8 @@ export default function App() {
                   >
                     <RefreshCw className={`w-4 h-4 text-teal-400 shrink-0 ${isSyncingDb ? 'animate-spin' : ''}`} />
                     <div className="flex flex-col text-right">
-                      <span>{lang === 'ar' ? 'مزامنة قاعدة البيانات سحابياً 🔄' : 'Sync Database with Cloud 🔄'}</span>
-                      <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'جلب أحدث التعديلات والسجلات فوراً' : 'Instant live update from Firestore'}</span>
+                      <span>{lang === 'ar' ? 'تحديث البيانات 🔄' : 'Refresh data 🔄'}</span>
+                      <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'جلب أحدث التعديلات والسجلات فوراً' : 'Instant live update from MySQL'}</span>
                     </div>
                   </button>
 
@@ -5979,7 +5313,7 @@ export default function App() {
                       <Download className={`w-4 h-4 text-emerald-400 shrink-0 ${isExportingBackup ? 'animate-bounce' : ''}`} />
                       <div className="flex flex-col text-right">
                         <span>{lang === 'ar' ? 'أخذ وتنزيل نسخة احتياطية 💾' : 'Download DB Backup 💾'}</span>
-                        <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'نسخ احتياطي شامل لقاعدة البيانات' : 'Full JSON export of Firestore'}</span>
+                        <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'نسخ احتياطي شامل لقاعدة البيانات' : 'Full JSON export of MySQL'}</span>
                       </div>
                     </button>
 
@@ -6177,7 +5511,7 @@ export default function App() {
                 </div>
 
                 <div className="space-y-1 pt-1">
-                  {/* Universal Database Cloud Sync Button (متاح لجميع المستخدمين بلا استثناء) */}
+                  {/* Universal Database Refresh data Button (متاح لجميع المستخدمين بلا استثناء) */}
                   <button
                     type="button"
                     onClick={() => {
@@ -6191,8 +5525,8 @@ export default function App() {
                   >
                     <RefreshCw className={`w-4 h-4 text-teal-400 shrink-0 ${isSyncingDb ? 'animate-spin' : ''}`} />
                     <div className="flex flex-col text-right">
-                      <span>{lang === 'ar' ? 'مزامنة قاعدة البيانات سحابياً 🔄' : 'Sync Database with Cloud 🔄'}</span>
-                      <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'تحديث ومزامنة كافة السجلات فوراً' : 'Instant live update from Firestore'}</span>
+                      <span>{lang === 'ar' ? 'تحديث البيانات 🔄' : 'Refresh data 🔄'}</span>
+                      <span className="text-[10px] text-slate-400 font-normal">{lang === 'ar' ? 'تحديث ومزامنة كافة السجلات فوراً' : 'Instant live update from MySQL'}</span>
                     </div>
                   </button>
 
@@ -6546,11 +5880,11 @@ export default function App() {
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-xs font-bold transition cursor-pointer hover:scale-105 active:scale-95 shadow-xs ${
                 darkMode ? 'bg-teal-500/15 border-teal-500/40 text-teal-300 hover:bg-teal-500/25' : 'bg-teal-50 border-teal-300 text-teal-800 hover:bg-teal-100'
               }`}
-              title={lang === 'ar' ? 'مزامنة وتحديث قاعدة البيانات سحابياً فوراً (متاح للجميع)' : 'Sync Database with Cloud Now'}
+              title={lang === 'ar' ? 'تحديث البيانات من الخادم' : 'Refresh data from server'}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-teal-400 shrink-0 ${isSyncingDb ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">{lang === 'ar' ? 'مزامنة الداتابيز 🔄' : 'Sync DB 🔄'}</span>
-              <span className="sm:hidden">{lang === 'ar' ? 'مزامنة 🔄' : 'Sync 🔄'}</span>
+              <span className="hidden sm:inline">{lang === 'ar' ? 'تحديث البيانات 🔄' : 'Refresh 🔄'}</span>
+              <span className="sm:hidden">{lang === 'ar' ? 'تحديث 🔄' : 'Refresh 🔄'}</span>
             </button>
 
             <button
@@ -8540,16 +7874,16 @@ export default function App() {
                   <div className="flex items-center justify-between pt-1 text-[11px] text-slate-400">
                     <div>
                       {text('سجلات الصرف المطابقة:', 'Matching Records:')}{' '}
-                      <span className="font-mono font-bold text-teal-400">{getFilteredDispenseRecords().length}</span>{' '}
+                      <span className="font-mono font-bold text-teal-400">{filteredDispenses.length}</span>{' '}
                       {text('من إجمالي', 'of total')}{' '}
                       <span className="font-mono font-bold text-slate-300">{dispenseRecords.length}</span>{' '}
                       {text('عملية صرف مسجلة', 'records')}
                     </div>
-                    {getFilteredDispenseRecords().length > 0 && (
+                    {filteredDispenses.length > 0 && (
                       <div className="hidden sm:block">
                         {text('إجمالي القيمة المصروفة:', 'Total Dispensed Value:')}{' '}
                         <span className="font-mono font-bold text-amber-400">
-                          {getFilteredDispenseRecords().reduce((sum, r) => sum + (r.totalPrice || 0), 0).toFixed(2)} ر.س
+                          {filteredDispenses.reduce((sum, r) => sum + (r.totalPrice || 0), 0).toFixed(2)} ر.س
                         </span>
                       </div>
                     )}
@@ -8692,7 +8026,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/40">
-                        {getFilteredDispenseRecords().length === 0 ? (
+                        {filteredDispenses.length === 0 ? (
                           <tr>
                             <td colSpan={10} className="p-10 text-center text-slate-400">
                               <HelpCircle className="w-8 h-8 text-slate-600 mx-auto mb-2" />
@@ -8702,12 +8036,12 @@ export default function App() {
                             </td>
                           </tr>
                         ) : (
-                          getFilteredDispenseRecords().map((rec, idx) => {
+                          pageRows(filteredDispenses,dispensePage).map((rec, idx) => {
                             const resInfo = getResidentInfoForDispense(rec.residentName, rec.residentId);
                             const medInfo = getMedicineInfoForDispense(rec.medicineName, rec.medicineId);
                             return (
                               <tr key={rec.id} className="hover:bg-slate-900/10 transition">
-                                <td className="p-4 font-mono text-slate-500 font-bold">{idx + 1}</td>
+                                <td className="p-4 font-mono text-slate-500 font-bold">{pageIndex(dispensePage,filteredDispenses.length)*RECORD_PAGE_SIZE + idx + 1}</td>
                                 <td className="p-4 font-bold text-slate-200">
                                   <div className="text-slate-100 font-bold text-sm">
                                     {resInfo.ar || rec.residentName}
@@ -8776,6 +8110,7 @@ export default function App() {
                         )}
                       </tbody>
                     </table>
+                    <RecordPager page={dispensePage} total={filteredDispenses.length} onChange={setDispensePage} lang={lang}/>
                   </div>
                 </div>
 
@@ -9473,7 +8808,7 @@ export default function App() {
                   {/* Save Button for System Administrator */}
                   <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-slate-800">
                     <div className="text-[11px] text-slate-500 font-medium">
-                      {text('يتم حفظ التعديلات فورياً في قاعدة البيانات السحابية (Firebase Cloud).', 'Changes are saved immediately to Firebase Cloud Database.')}
+                      {text('يتم حفظ التعديلات فورياً في قاعدة البيانات السحابية (MySQL Cloud).', 'Changes are saved immediately to MySQL Cloud Database.')}
                     </div>
 
                     <button
@@ -9602,7 +8937,7 @@ export default function App() {
                       </div>
 
                       <div className="p-3 bg-slate-900 rounded-xl text-[11px] text-slate-400 leading-relaxed">
-                        {text('يتم التقاط وحفظ هذه البيانات تلقائياً وتحديثها في مستندات Firestore الفرعية لتوفير شفافية الأمان ومكافحة تسريب البيانات الطبية للمرضى المستفيدين بالمركز.', 'This metadata is captured automatically in real-time to guarantee audit compliance and protect resident health records from data leaks.')}
+                        {text('يتم التقاط وحفظ هذه البيانات تلقائياً وتحديثها في مستندات MySQL الفرعية لتوفير شفافية الأمان ومكافحة تسريب البيانات الطبية للمرضى المستفيدين بالمركز.', 'This metadata is captured automatically in real-time to guarantee audit compliance and protect resident health records from data leaks.')}
                       </div>
                     </div>
                   </div>
@@ -9649,7 +8984,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Cloud Firebase Database Live Status Card */}
+                {/* Cloud MySQL Database Live Status Card */}
                 <div className={`p-5 sm:p-6 rounded-3xl border transition-all ${darkMode ? 'bg-slate-900/50 border-slate-800' : 'bg-white border-slate-200'} space-y-4`}>
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -9658,18 +8993,18 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
-                          {text('حالة قاعدة بيانات Firebase السحابية (Cloud Firestore)', 'Cloud Firebase Database Status (Cloud Firestore)')}
+                          {text('حالة قاعدة بيانات MySQL السحابية (Cloud MySQL)', 'Cloud MySQL Database Status (Cloud MySQL)')}
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1.5 ${
-                            isFirebaseConnected 
+                            isDatabaseConnected
                               ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
                               : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
                           }`}>
-                            <span className={`w-2 h-2 rounded-full ${isFirebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-                            {isFirebaseConnected ? text('متصلة ومفعلة بالسحابة 🟢', 'Live & Connected 🟢') : text('تخزين محلي احتياطي ⚠️', 'Local Fallback ⚠️')}
+                            <span className={`w-2 h-2 rounded-full ${isDatabaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+                            {isDatabaseConnected ? text('الخادم متصل 🟢', 'Server connected 🟢') : text('الخادم غير متاح ⚠️', 'Server unavailable ⚠️')}
                           </span>
                         </h3>
                         <p className="text-xs text-slate-400 mt-0.5">
-                          {text('تم ربط مخزن الصيدلية وسجلات الصرف وعمليات التدقيق مباشرة مع مشروع Firebase المعتمد.', 'Pharmacy inventory, dispense records, and audit logs are connected directly with the active Firebase project.')}
+                          {text('تم ربط مخزن الصيدلية وسجلات الصرف وعمليات التدقيق مباشرة مع مشروع MySQL المعتمد.', 'Pharmacy inventory, dispense records, and audit logs are connected directly with the active MySQL project.')}
                         </p>
                       </div>
                     </div>
@@ -9682,7 +9017,7 @@ export default function App() {
                         className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-all shrink-0 hover:scale-105 active:scale-95 disabled:opacity-50"
                       >
                         <RefreshCw className={`w-4 h-4 ${isSyncingDb ? 'animate-spin' : ''}`} />
-                        <span>{text('مزامنة سحابية الآن 🔄', 'Sync with Cloud Now 🔄')}</span>
+                        <span>{text('تحديث البيانات', 'Refresh data')}</span>
                       </button>
 
                       {/* Developer Only: Backup and Restore Buttons */}
@@ -9717,20 +9052,20 @@ export default function App() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs pt-1">
                     <div className={`p-3 rounded-2xl border ${darkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                       <span className="text-slate-400 block text-[10px] mb-1 font-semibold">{text('معرف المشروع (Project ID)', 'Project ID')}</span>
-                      <span className="font-mono font-bold text-amber-400 text-xs">{firebaseConfig.projectId}</span>
+                      <span className="font-mono font-bold text-amber-400 text-xs">{databaseInfo.projectId}</span>
                     </div>
                     <div className={`p-3 rounded-2xl border ${darkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                       <span className="text-slate-400 block text-[10px] mb-1 font-semibold">{text('نطاق المصادقة (Auth Domain)', 'Auth Domain')}</span>
-                      <span className="font-mono text-slate-300 text-xs truncate block" title={firebaseConfig.authDomain}>{firebaseConfig.authDomain}</span>
+                      <span className="font-mono text-slate-300 text-xs truncate block" title={databaseInfo.authDomain}>{databaseInfo.authDomain}</span>
                     </div>
                     <div className={`p-3 rounded-2xl border ${darkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                       <span className="text-slate-400 block text-[10px] mb-1 font-semibold">{text('حاوية التخزين (Storage Bucket)', 'Storage Bucket')}</span>
-                      <span className="font-mono text-slate-300 text-xs truncate block" title={firebaseConfig.storageBucket}>{firebaseConfig.storageBucket}</span>
+                      <span className="font-mono text-slate-300 text-xs truncate block" title={databaseInfo.storageBucket}>{databaseInfo.storageBucket}</span>
                     </div>
                     <div className={`p-3 rounded-2xl border ${darkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                       <span className="text-slate-400 block text-[10px] mb-1 font-semibold">{text('معرف التطبيق والقياس', 'App & Measurement ID')}</span>
-                      <span className="font-mono text-teal-400 text-xs truncate block" title={`${firebaseConfig.appId} | ${firebaseConfig.measurementId}`}>
-                        {firebaseConfig.measurementId || 'G-PLKCCZGCDQ'}
+                      <span className="font-mono text-teal-400 text-xs truncate block" title={`${databaseInfo.appId} | ${databaseInfo.measurementId}`}>
+                        {databaseInfo.measurementId || 'G-PLKCCZGCDQ'}
                       </span>
                     </div>
                   </div>
@@ -9822,12 +9157,12 @@ export default function App() {
                         {text('إعدادات قنوات الاتصال والتنبيهات التلقائية (المبرمج فقط)', 'Automated Communication Channels & Alert Gateways (Developer Only)')}
                       </h3>
                       <p className="text-xs text-slate-400 mt-1">
-                        {text('اضبط بوابات التنبيه التلقائي عبر WhatsApp والبريد الإلكتروني المهني. يتم تخزين هذه الحقول بالكامل في قاعدة بيانات Firebase.', 'Configure WhatsApp & Email gateways. These fields are stored in Firebase database.')}
+                        {text('اضبط بوابات التنبيه التلقائي عبر WhatsApp والبريد الإلكتروني المهني. يتم تخزين هذه الحقول بالكامل في قاعدة بيانات MySQL.', 'Configure WhatsApp & Email gateways. These fields are stored in MySQL database.')}
                       </p>
                       <div className="flex flex-wrap items-center gap-2 pt-2.5">
                         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-teal-500/10 border border-teal-500/30 text-teal-300 font-mono text-[11px] font-bold">
                           <Database className="w-3.5 h-3.5 text-teal-400" />
-                          <span>Firestore: <strong className="text-amber-400">security_settings/config</strong></span>
+                          <span>MySQL: <strong className="text-amber-400">security_settings/config</strong></span>
                         </span>
                         {secSettingsState.updatedAt && (
                           <span className="text-[11px] text-slate-400">
@@ -10255,7 +9590,7 @@ export default function App() {
                                     ? { baseUrl: waPilotBaseUrl, apiKey: waPilotApiKey, type: waPilotType, deviceId: waPilotDevice, endpointPath: waPilotPath, to: whatsAppNumber, body: combinedMsg, attachments: waPdfAttachments }
                                     : { instanceId: ultraMsgInstance, token: ultraMsgToken, to: whatsAppNumber, body: combinedMsg, attachments: waPdfAttachments };
 
-                                const response = await fetch(endpoint, {
+                                const response = await protectedFetch(endpoint, {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify(payload)
@@ -10547,7 +9882,7 @@ export default function App() {
                                 const combinedMsg = `${arReport}\n\n${"=".repeat(56)}\n\n${enReport}`;
                                 const testAttachments = generateMedicationEmailAttachments(medicines, alertDays);
 
-                                const response = await fetch('/api/notifications/send-email', {
+                                const response = await protectedFetch('/api/notifications/send-email', {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
                                   body: JSON.stringify({
@@ -10900,7 +10235,7 @@ export default function App() {
                         <RefreshCw className={`w-3.5 h-3.5 ${savingSecSettings ? 'animate-spin' : 'animate-spin-slow'}`} />
                         <span>
                           {savingSecSettings 
-                            ? text('جاري الحفظ في قاعدة بيانات Firebase...', 'Saving to Firebase Cloud DB...')
+                            ? text('جاري الحفظ في قاعدة بيانات MySQL...', 'Saving to MySQL Cloud DB...')
                             : text('حفظ الإعدادات في قاعدة البيانات 💾', 'Save Settings to Database 💾')}
                         </span>
                       </button>
@@ -10929,8 +10264,8 @@ export default function App() {
                 text={text}
                 showToast={showToast}
                 currentUser={currentUser}
-                isFirebaseConnected={isFirebaseConnected}
-                firebaseProjectId={firebaseConfig.projectId}
+                isDatabaseConnected={isDatabaseConnected}
+                databaseName={databaseInfo.projectId}
                 onRefreshData={loadAllData}
                 onExportBackup={handleExportBackup}
               />
@@ -11291,7 +10626,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800/50">
-                          {stockLogs.map((log) => {
+                          {pageRows(stockLogs,auditPage).map((log) => {
                             const isRtl = lang === 'ar';
                             const actionBadgeText = isRtl ? log.actionType : (
                               log.actionType === 'إضافة دواء جديد' ? 'New Medication Added' :
@@ -11356,6 +10691,7 @@ export default function App() {
                           )}
                         </tbody>
                       </table>
+                    <RecordPager page={auditPage} total={stockLogs.length} onChange={setAuditPage} lang={lang}/>
                     </div>
                   </div>
 
@@ -12332,12 +11668,12 @@ export default function App() {
                                 {currentUser?.role === 'developer' ? (
                                   <div className="flex items-center gap-1.5">
                                     <span className="font-mono text-teal-300 font-bold bg-teal-950/40 border border-teal-800/50 px-2 py-0.5 rounded text-xs select-all">
-                                      {u.password}
+                                      {text('محمية','Protected')}
                                     </span>
                                     <button 
                                       type="button"
                                       onClick={() => {
-                                        navigator.clipboard.writeText(u.password || '');
+                                        showToast(text('كلمات المرور لا تُعرض أو تُنسخ. يمكنك تعيين كلمة مرور جديدة.','Passwords cannot be displayed. Set a new password instead.'),'error');
                                         showToast(text('تم نسخ كلمة المرور', 'Password copied'), 'success');
                                       }}
                                       className="p-1 text-slate-400 hover:text-teal-300 hover:bg-slate-800 rounded transition cursor-pointer"
@@ -12361,13 +11697,13 @@ export default function App() {
                                         showToast(text('عذراً، لا يمكن تعديل حساب المبرمج إلا بواسطة مبرمج!', 'Developer accounts can only be edited by a developer!'), 'error');
                                         return;
                                       }
-                                      setSelectedUserId(u.uid);
+                                      setSelectedUserId(u.uid);editingUserVersion.current=u._version;
                                       setUserForm({
                                         name: u.name,
                                         email: u.email,
                                         role: u.role,
                                         phone: u.phone || '',
-                                        password: u.password
+                                        password: ''
                                       });
                                       setShowEditUserModal(true);
                                     }}
@@ -12418,7 +11754,7 @@ export default function App() {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                  <form onSubmit={(e) => {
+                  <form onSubmit={async (e) => {
                     e.preventDefault();
                     if (currentUser?.role === 'technician') {
                       showToast(text('ليس لديك صلاحية لإضافة مستفيدين (صلاحيات فني صيدلة).', 'Pharmacy technicians are not permitted to register residents.'), 'error');
@@ -12439,7 +11775,7 @@ export default function App() {
                       nameEn: primaryEn,
                       age: computedAge
                     };
-                    updateResidentsList([...residents, newRes]);
+                    if(!await updateResidentsList([...residents, newRes]))return;
                     setShowAddResidentModal(false);
                     showToast(text(`تم تسجيل المستفيد الجديد "${newRes.name}" بنجاح!`, `Resident "${newRes.nameEn || newRes.name}" added successfully!`), 'success');
                   }} className="space-y-4 text-xs">
@@ -12623,7 +11959,7 @@ export default function App() {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                  <form onSubmit={(e) => {
+                  <form onSubmit={async (e) => {
                     e.preventDefault();
                     if (currentUser?.role === 'technician') {
                       showToast(text('ليس لديك صلاحية لتعديل بيانات المستفيدين (صلاحيات فني صيدلة).', 'Pharmacy technicians are not permitted to edit resident profiles.'), 'error');
@@ -12645,7 +11981,7 @@ export default function App() {
                       nameEn: primaryEn,
                       age: computedAge 
                     } : r);
-                    updateResidentsList(updated);
+                    if(!await updateResidentsList(updated))return;
                     const target = updated.find(r => r.id === selectedResidentId);
                     if (target && activeDossierResident?.id === selectedResidentId) {
                       setActiveDossierResident(target);
@@ -12828,7 +12164,7 @@ export default function App() {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                  <form onSubmit={(e) => {
+                  <form onSubmit={async (e) => {
                     e.preventDefault();
                     if (!userForm.name || !userForm.email || !userForm.password) {
                       showToast(text('يرجى ملء حقول الاسم والبريد الإلكتروني وكلمة المرور', 'Please fill in name, email, and password fields'), 'error');
@@ -12846,8 +12182,7 @@ export default function App() {
                       uid: "user-" + Math.random().toString(36).substr(2, 9),
                       ...userForm
                     };
-                    DbService.addUser(newUser);
-                    updateUsersList([...users, newUser]);
+                    try { const saved=await DbService.addUser(newUser);updateUsersList([...users,saved]); } catch(err:any){showToast(err.message,'error');return;}
                     setShowAddUserModal(false);
                     showToast(text(`تم إنشاء حساب المستخدم "${newUser.name}" بنجاح!`, `User account "${newUser.name}" created successfully!`), 'success');
                   }} className="space-y-4 text-xs">
@@ -12938,16 +12273,16 @@ export default function App() {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                  <form onSubmit={(e) => {
+                  <form onSubmit={async (e) => {
                     e.preventDefault();
                     if (!selectedUserId) return;
                     if (userForm.role === 'developer' && currentUser?.role !== 'developer') {
                       showToast(text('عذراً، فقط المبرمج يملك صلاحية تعيين دور مبرمج!', 'Only the Developer can assign the Developer role!'), 'error');
                       return;
                     }
-                    const updatedUser = { uid: selectedUserId, ...userForm };
-                    DbService.updateUser(updatedUser);
-                    const updated = users.map(u => u.uid === selectedUserId ? { ...u, ...userForm } : u);
+                    const updatedUser = { uid: selectedUserId, ...userForm, _version:editingUserVersion.current };
+                    let saved:any;try {saved=await DbService.updateUser(updatedUser);}catch(err:any){showToast(err.message,'error');return;}
+                    const updated = users.map(u => u.uid === selectedUserId ? saved : u);
                     updateUsersList(updated);
                     setShowEditUserModal(false);
                     showToast(text('تم تعديل بيانات المستخدم بنجاح.', 'User details updated successfully.'), 'success');
@@ -12999,7 +12334,7 @@ export default function App() {
                         {currentUser?.role !== 'developer' && (
                           <span className="text-[10px] text-slate-500 flex items-center gap-1 font-sans">
                             <Lock className="w-2.5 h-2.5" />
-                            {text('مشفرة ومخفية (للمبرمج فقط)', 'Masked (Dev only)')}
+                            {text('محفوظة في قاعدة البيانات ولا تُعرض هنا', 'Stored in database; not displayed here')}
                           </span>
                         )}
                       </div>
@@ -13850,7 +13185,7 @@ export default function App() {
 
                   {/* Modal Body Form */}
                   <form 
-                    onSubmit={(e) => {
+                    onSubmit={async (e) => {
                       e.preventDefault();
                       const updatedResident = {
                         ...activeDossierResident,
@@ -13865,7 +13200,7 @@ export default function App() {
                       };
 
                       const updatedResidents = residents.map(r => r.id === activeDossierResident.id ? updatedResident : r);
-                      updateResidentsList(updatedResidents);
+                      if(!await updateResidentsList(updatedResidents))return;
                       setActiveDossierResident(updatedResident);
                       setShowEditMedicalDossierModal(false);
                       showToast(text('تم حفظ وتحديث بيانات الملف الطبي الشامل للمريض بنجاح! 🩺📋', 'Clinical medical file updated successfully!'), 'success');
@@ -15358,7 +14693,7 @@ export default function App() {
                         <div>
                           <div className="flex items-center justify-between mb-1">
                             <label className="block text-slate-400">{text('الوحدة *', 'Unit *')}</label>
-                            {currentUser?.role !== 'technician' && (
+                            {['developer','admin'].includes(currentUser?.role || '') && (
                               <button
                                 type="button"
                                 onClick={() => setShowManageUnitsModal(true)}
@@ -15412,7 +14747,7 @@ export default function App() {
                         <div>
                           <div className="flex items-center justify-between mb-1">
                             <label className="block text-slate-400">{text('الفئة العلاجية *', 'Therapeutic Category *')}</label>
-                            {currentUser?.role !== 'technician' && (
+                            {['developer','admin'].includes(currentUser?.role || '') && (
                               <button
                                 type="button"
                                 onClick={() => setShowManageCategoriesModal(true)}
@@ -16958,11 +16293,11 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Content Counts Grid - Displays ALL Firebase Firestore Collections */}
+                    {/* Content Counts Grid - Displays ALL MySQL Collections */}
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between">
                         <h4 className="text-xs font-bold text-slate-300">
-                          {text('محتويات وجداول قاعدة البيانات المراد استعادتها بالكامل (11+ جدول):', 'All Firebase Firestore Collections to be Restored:')}
+                          {text('محتويات وجداول قاعدة البيانات المراد استعادتها بالكامل (11+ جدول):', 'All MySQL Collections to be Restored:')}
                         </h4>
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-teal-500/20 text-teal-300 border border-teal-500/30">
                           {text('إجمالي السجلات:', 'Total docs:')} {restoreModalData.counts?.totalDocuments || restoreModalData.counts?.total || Object.values(restoreModalData.counts || {}).reduce((a: any, b: any) => typeof b === 'number' ? a + b : a, 0)}
@@ -17081,8 +16416,8 @@ export default function App() {
                       <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
                       <p>
                         {text(
-                          'تحذير: سيتم استعادة وكتابة هذه البيانات في قاعدة بيانات Firebase السحابية وفي التخزين المحلي للمركز فوراً. يرجى تأكيد استعادة النسخة.',
-                          'Warning: This action will write and restore records to Cloud Firebase and local storage immediately. Please confirm you want to proceed.'
+                          'تحذير: سيتم استعادة وكتابة هذه البيانات في قاعدة بيانات MySQL السحابية وفي التخزين المحلي للمركز فوراً. يرجى تأكيد استعادة النسخة.',
+                          'Warning: This action will write and restore records to Cloud MySQL and local storage immediately. Please confirm you want to proceed.'
                         )}
                       </p>
                     </div>
@@ -17111,7 +16446,7 @@ export default function App() {
                       ) : (
                         <>
                           <Upload className="w-4 h-4" />
-                          <span>{text('تأكيد واستعادة البيانات سحابياً 🚀', 'Confirm & Restore to Cloud 🚀')}</span>
+                          <span>{text('تأكيد الاستيراد الإضافي', 'Confirm additive import')}</span>
                         </>
                       )}
                     </button>
@@ -17128,7 +16463,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-20 border-t border-slate-900 py-6 text-center text-xs text-slate-500 print:hidden bg-slate-950 relative z-10">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p>© 2026 {OFFICIAL_CENTER_NAME}. {text('جميع الحقوق والبيانات الطبية مشفرة ومحمية بالكامل.', 'All rights and medical data fully encrypted and secured.')}</p>
+          <p>© 2026 {OFFICIAL_CENTER_NAME}. {text('جميع الحقوق محفوظة. الوصول للبيانات للمستخدمين المخولين.', 'All rights reserved. Data access is restricted to authorized users.')}</p>
           <div className="flex items-center gap-3">
             <span>{text('إصدار التطبيق المستقل PWA v1.2.0', 'PWA Standalone App v1.2.0')}</span>
             <span>·</span>
